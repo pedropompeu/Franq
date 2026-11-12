@@ -54,6 +54,15 @@ class SemanticDictionary(_Strict):
             if not col.reliable
         )
 
+    def pii_columns(self) -> frozenset[str]:
+        """``table.column`` names holding personal data (pseudonymized before the LLM)."""
+        return frozenset(
+            f"{table}.{column}"
+            for table, note in self.tables.items()
+            for column, col in note.columns.items()
+            if col.pii
+        )
+
     def referenced_columns(self) -> set[str]:
         refs = {f"{t}.{c}" for t, note in self.tables.items() for c in note.columns}
         refs |= {col for metric in self.metrics for col in metric.columns}

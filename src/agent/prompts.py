@@ -8,6 +8,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from src.agent.models import Step
 from src.db.tools import QueryResult
+from src.privacy import PROMPT_NOTE, TOKEN, Pseudonymizer
 
 SYSTEM_PROMPT = """Você é um analista de dados júnior, cuidadoso e autônomo. Responde perguntas de negócio \
 da diretoria consultando um banco SQLite. A cada passo, você devolve UMA decisão estruturada.
@@ -54,28 +55,31 @@ def build_context(schema_prompt: str, semantic_prompt: str) -> str:
     return f"# Schema do banco (descoberto dinamicamente)\n{schema_prompt}\n\n{semantic_prompt}"
 
 
-def _result_block(result: QueryResult, max_rows: int) -> str:
+def _result_block(result: QueryResult, max_rows: int, privacy: Pseudonymizer) -> str:
     payload = {
         "colunas": result.columns,
-        "linhas": result.rows[:max_rows],
+        "linhas": privacy.mask_rows(result.rows[:max_rows]),
         "total_de_linhas": result.row_count,
         "truncado": result.truncated or result.row_count > max_rows,
     }
     return "<dados>\n" + json.dumps(payload, ensure_ascii=False, default=str) + "\n</dados>"
 
 
-def render_history(steps: list[Step], results: dict[int, QueryResult], max_rows: int) -> str:
+def render_history(
+    steps: list[Step], results: dict[int, QueryResult], max_rows: int, privacy: Pseudonymizer | None = None
+) -> str:
+    privacy = privacy or Pseudonymizer()
     if not steps:
         return "Nenhum passo executado ainda."
     parts: list[str] = []
     for step in steps:
         header = f"Passo {step.index} ({step.kind})"
         if step.sql:
-            header += f"\nSQL:\n{step.sql}"
+            header += f"\nSQL:\n{privacy.mask(step.sql)}"
         if step.kind == "query" and step.index in results:
-            parts.append(f"{header}\nResultado:\n{_result_block(results[step.index], max_rows)}")
+            parts.append(f"{header}\nResultado:\n{_result_block(results[step.index], max_rows, privacy)}")
         elif step.error:
-            parts.append(f"{header}\nErro: {step.error}")
+            parts.append(f"{header}\nErro: {privacy.mask(step.error)}")
         else:
             parts.append(header)
     return "\n\n".join(parts)
@@ -89,10 +93,15 @@ def build_messages(
     *,
     max_rows: int,
     remaining_steps: int,
+    privacy: Pseudonymizer | None = None,
 ) -> list[BaseMessage]:
-    history = render_history(steps, results, max_rows)
+    """Everything that leaves for the model is masked; with no personal data the prompt is unchanged."""
+    privacy = privacy or Pseudonymizer()
+    history = render_history(steps, results, max_rows, privacy)
     user = (
-        f"{context}\n\n# Pergunta do usuário\n{question}\n\n# Passos até agora\n{history}\n\n"
+        f"{context}\n\n# Pergunta do usuário\n{privacy.mask(question)}\n\n# Passos até agora\n{history}\n\n"
         f"Você ainda tem {remaining_steps} decisão(ões). Decida o próximo passo."
     )
+    if TOKEN.search(user):
+        user += f"\n\n# Dados pessoais\n{PROMPT_NOTE}"
     return [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user)]

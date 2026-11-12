@@ -21,6 +21,7 @@ from src.config import Settings
 from src.db.tools import QueryError, QueryResult, discover_schema, run_sql
 from src.llm import LLMError, StructuredLLM
 from src.observability import Tracer
+from src.privacy import Pseudonymizer, load_pseudonymizer
 from src.semantic.dictionary import SemanticDictionary, load_dictionary, validate_against_schema
 
 REFUSAL_FALLBACK = "Não posso atender a esse pedido. Só respondo perguntas consultando os dados."
@@ -85,12 +86,15 @@ class Assistant:
         limits: AgentLimits | None = None,
         tracer: Tracer | None = None,
         dictionary: SemanticDictionary | None = None,
+        privacy: Pseudonymizer | None = None,
     ) -> None:
         self.llm = llm
         self.settings = settings
         self.limits = limits or AgentLimits()
         self.tracer = tracer
         self.dictionary = dictionary or load_dictionary(settings.dictionary_path)
+        # Personal data never leaves for the LLM: see src/privacy.py.
+        self.privacy = privacy or load_pseudonymizer(settings.db_path, self.dictionary.pii_columns())
         self.schema_warnings: list[str] = []
         self._graph = self._build()
 
@@ -104,7 +108,8 @@ class Assistant:
             exclude_from_reference=unreliable,
         )
         self.schema_warnings = validate_against_schema(self.dictionary, schema)
-        return {"context": build_context(schema.to_prompt(unreliable), self.dictionary.to_prompt())}
+        context = build_context(schema.to_prompt(unreliable), self.dictionary.to_prompt())
+        return {"context": self.privacy.mask(context)}
 
     def _decide(self, state: AgentState) -> dict[str, object]:
         steps = state["steps"]
@@ -117,6 +122,7 @@ class Assistant:
             state["results"],
             max_rows=self.settings.max_rows_for_llm,
             remaining_steps=self.limits.max_steps - state["llm_calls"],
+            privacy=self.privacy,
         )
         try:
             reply = self.llm.decide(messages)
@@ -130,8 +136,10 @@ class Assistant:
                     "Não consegui consultar o modelo de linguagem.",
                 ),
             }
+        # The model writes tokens like '[nome_3]'; the SQL runs (and is shown) with the real value.
+        decision = reply.decision.model_copy(update={"sql": self.privacy.unmask_sql(reply.decision.sql)})
         return {
-            "decision": reply.decision,
+            "decision": decision,
             "llm_calls": state["llm_calls"] + 1,
             "cache_hits": state["cache_hits"] + int(reply.cached),
             "model": reply.model,
@@ -289,5 +297,29 @@ class Assistant:
             }
         )
         if self.tracer is not None:
-            self.tracer.write(response)
-        return response
+            self.tracer.write(self._masked(response))
+        return self._unmasked(response)
+
+    def _unmasked(self, response: AgentResponse) -> AgentResponse:
+        """What the user sees: the model's tokens turned back into real values."""
+        p = self.privacy
+        return response.model_copy(
+            update={
+                "answer": p.unmask(response.answer),
+                "assumptions": [p.unmask(a) for a in response.assumptions],
+                "steps": [s.model_copy(update={"thought": p.unmask(s.thought)}) for s in response.steps],
+            }
+        )
+
+    def _masked(self, response: AgentResponse) -> AgentResponse:
+        """What the trace keeps: no personal values in the question or the SQL."""
+        p = self.privacy
+        return response.model_copy(
+            update={
+                "question": p.mask(response.question),
+                "steps": [
+                    s.model_copy(update={"sql": p.mask(s.sql), "error": p.mask(s.error) if s.error else s.error})
+                    for s in response.steps
+                ],
+            }
+        )
