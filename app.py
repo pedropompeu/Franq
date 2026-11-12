@@ -194,21 +194,20 @@ def render_welcome(rt: Runtime, asked: set[str]) -> str | None:
     with st.container(key=style.WELCOME), st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
         if rt.error:
             st.error(texts.MISSING_KEY.format(error=rt.error), icon=":material/key_off:")
-        text = texts.WELCOME
+        st.markdown(texts.WELCOME)
         if rt.coverage:
             start, end = (view.br_date(d) for d in rt.coverage)
-            text += " " + texts.WELCOME_COVERAGE.format(start=start, end=end)
-        st.markdown(text)
+            st.markdown(texts.WELCOME_COVERAGE.format(start=start, end=end))
         if rt.assistant is None:
             return None
         st.markdown(texts.WELCOME_SUGGESTIONS)
-        columns = st.container(key=style.SUGGESTIONS).columns(2)
+        # One per line, sized to the label: in two columns the labels did not fit and were cut with "…".
+        buttons = st.container(key=style.SUGGESTIONS)
         suggestions = zip(texts.SUGGESTED_QUESTIONS, texts.SUGGESTION_LABELS, strict=True)
         for i, (question, (kind, short)) in enumerate(suggestions):
             icon = ":material/check:" if question in asked else ":material/arrow_outward:"
-            with columns[i % 2]:
-                if st.button(f"**{kind}** · {short}", key=f"suggest-{i}", icon=icon, help=question, width="stretch"):
-                    pending = question
+            if buttons.button(f"**{kind}** · {short}", key=f"suggest-{i}", icon=icon, help=question, width="content"):
+                pending = question
     return pending
 
 

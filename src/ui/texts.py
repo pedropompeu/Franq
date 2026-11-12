@@ -11,12 +11,15 @@ APP_TITLE: Final = "Indaga"
 SUBTITLE: Final = "Assistente de dados"
 TAGLINE: Final = "Pergunte. Veja a consulta. Confie no número."
 INPUT_PLACEHOLDER: Final = "Pergunte sobre clientes, compras, suporte ou campanhas"
-WELCOME: Final = "Respondo perguntas sobre clientes, compras, suporte e campanhas."
+WELCOME: Final = (
+    "Olá! Sou o Indaga, seu assistente de dados. Pergunte em português sobre clientes, compras, "
+    "suporte e campanhas: eu monto a consulta, trago o resultado e mostro como cheguei nele."
+)
 WELCOME_COVERAGE: Final = (
-    "Os dados vão de **{start}** a **{end}**; quando você disser “maio” ou “último ano”, "
+    "Os dados vão de **{start}** a **{end}**. Quando você disser “maio” ou “último ano”, "
     "conto a partir do fim desse período."
 )
-WELCOME_SUGGESTIONS: Final = "Algumas perguntas para começar:"
+WELCOME_SUGGESTIONS: Final = "Sugestões de perguntas:"
 LOADING: Final = "Consultando o banco…"
 
 # The five questions from the challenge statement, sent as written; the button shows the short form.
