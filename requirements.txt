@@ -1,4 +1,4 @@
-# Runtime. Streamlit entra no Dia 3.
+# Runtime.
 pydantic==2.14.3
 PyYAML==6.0.3
 sqlglot==30.31.0
@@ -6,3 +6,5 @@ langgraph==1.2.21
 langchain-core==1.8.0
 langchain-google-genai==4.5.0
 google-genai==3.3.0
+streamlit==1.67.0
+altair==6.3.0  # specs de gráfico (usado diretamente em src/ui/view.py)

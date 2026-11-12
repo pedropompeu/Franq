@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: install lint typecheck test check
+.PHONY: install lint typecheck test check run
 
 install:
 	python3 -m venv .venv
@@ -17,3 +17,6 @@ test:
 	$(PY) -m pytest
 
 check: lint typecheck test
+
+run:
+	$(PY) -m streamlit run app.py

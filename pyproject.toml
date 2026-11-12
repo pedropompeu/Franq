@@ -24,4 +24,4 @@ ignore = ["S608"]  # dynamic SQL is the product; identifiers are quoted and quer
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["src", "tests"]
+files = ["src", "tests", "app.py"]

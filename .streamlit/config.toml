@@ -1,0 +1,60 @@
+# Tema claro "Grafite e laranja" sobre "Cinza frio" (BRAND.md). Contrastes medidos sobre #E6E9EE:
+# texto 15,1:1 · texto secundário 6,7:1 · controle 4,35:1 · laranja #C2410C 4,25:1 (texto branco nele 5,2:1).
+# Laranja só em ação (botão primário, foco, link); dados nunca usam a cor de ação.
+# Cores de status (texto sobre fundo próprio) todas acima de 4,5:1, também sobre o fundo da página.
+# Paleta categórica = paleta de referência da skill dataviz, validada sobre #E6E9EE
+# (daltonismo pior par 9,1; visão normal 19,6). Contraste baixo de algumas cores → legenda e tabela sempre.
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "none"
+
+[theme]
+base = "light"
+primaryColor = "#C2410C"
+backgroundColor = "#E6E9EE"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0E1520"
+linkColor = "#B23A0A"
+borderColor = "#646C79"
+showWidgetBorder = true
+baseRadius = "4px"
+codeFont = "monospace"
+codeTextColor = "#0E1520"
+codeBackgroundColor = "#F3F4F6"
+dataframeBorderColor = "#AEB5C0"
+dataframeHeaderBackgroundColor = "#DDE1E7"  # mais escuro que as células (#E6E9EE), para o cabeçalho se destacar
+dataframeHeaderTextColor = "#0E1520"
+# status: recusa/erro · premissa/autocorreção · sucesso · informação · neutro
+redColor = "#B42318"
+redTextColor = "#B42318"
+redBackgroundColor = "#FDECEC"
+orangeColor = "#C2410C"
+orangeTextColor = "#B23A0A"
+orangeBackgroundColor = "#FDF0E8"
+yellowColor = "#8A5A00"
+yellowTextColor = "#8A5A00"
+yellowBackgroundColor = "#FDF5E1"
+greenColor = "#1A6B43"
+greenTextColor = "#1A6B43"
+greenBackgroundColor = "#E8F5EE"
+blueColor = "#1D5FB0"
+blueTextColor = "#1D5FB0"
+blueBackgroundColor = "#EAF1FB"
+violetColor = "#5B45C2"
+violetTextColor = "#5B45C2"
+violetBackgroundColor = "#F0EDFB"
+grayColor = "#465061"
+grayTextColor = "#465061"
+grayBackgroundColor = "#EEF0F3"
+chartCategoricalColors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
+
+[theme.sidebar]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F4F6"

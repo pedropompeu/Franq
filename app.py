@@ -1,0 +1,283 @@
+"""Streamlit interface: ``streamlit run app.py`` (or ``make run``).
+
+Thin layer over ``Assistant.ask``. Presentation decisions live in ``src/ui/view.py`` and
+``src/ui/query_graph.py`` (tested); copy lives in ``src/ui/texts.py``.
+
+Layout is a conversation: a welcome message with the data coverage and suggestions, then each
+question and its answer one below the other (answer → premise → result card → "how I got here").
+Badges appear only for exceptions (refusal, failure, self-correction). Depth (white messages
+with shadow, graphite user bubble, recessed cards) comes from ``src/ui/style.css`` painting the
+keyed containers listed in ``src/ui/style.py``.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+
+import streamlit as st
+
+from src.agent.graph import Assistant
+from src.agent.models import AgentResponse, Step
+from src.config import Settings, load_env_file
+from src.db.tools import QueryResult, discover_schema
+from src.llm import LLMError, get_llm
+from src.observability import Tracer
+from src.semantic.dictionary import load_dictionary
+from src.ui import query_graph, style, texts, view
+
+ASSISTANT_AVATAR = ":material/query_stats:"
+USER_BUBBLE_INDENT_PX = 96
+
+st.set_page_config(
+    page_title=f"{texts.APP_TITLE} · {texts.SUBTITLE}",
+    page_icon=":material/query_stats:",
+    initial_sidebar_state="collapsed",
+)
+
+
+@dataclass(frozen=True)
+class Runtime:
+    settings: Settings
+    tracer: Tracer
+    assistant: Assistant | None
+    error: str | None
+    coverage: tuple[str, str] | None
+    columns: dict[str, frozenset[str]]  # table -> column names, to resolve the query graph
+
+
+@st.cache_resource
+def runtime() -> Runtime:
+    load_env_file()
+    settings = Settings.from_env()
+    tracer = Tracer(settings.trace_path)
+    try:
+        assistant: Assistant | None = Assistant(get_llm(), settings, tracer=tracer)
+        error = None
+    except LLMError as err:
+        assistant, error = None, str(err)
+    unreliable = load_dictionary(settings.dictionary_path).unreliable_columns()
+    schema = discover_schema(
+        settings.db_path, max_categorical=settings.max_categorical_values, exclude_from_reference=unreliable
+    )
+    columns = {t.name: frozenset(c.name for c in t.columns) for t in schema.tables}
+    return Runtime(settings, tracer, assistant, error, view.coverage(schema, unreliable), columns)
+
+
+def render_sidebar(rt: Runtime) -> None:
+    with st.sidebar:
+        st.markdown(f"### {texts.SIDEBAR_ABOUT}")
+        st.caption(texts.TAGLINE)
+        if rt.assistant is None:
+            return
+        unreliable = sorted(rt.assistant.dictionary.unreliable_columns())
+        if unreliable:
+            st.caption(texts.SIDEBAR_UNRELIABLE.format(columns=", ".join(f"`{c}`" for c in unreliable)))
+        if rt.assistant.schema_warnings:
+            with st.expander(texts.SIDEBAR_SCHEMA_WARNINGS):
+                for warning in rt.assistant.schema_warnings:
+                    st.caption(warning)
+        st.markdown(f"**{texts.SIDEBAR_MODEL}**")
+        st.caption(os.getenv("GEMINI_MODELS") or rt.assistant.llm.model_name)
+        st.caption(texts.SIDEBAR_CACHE_MODE.get(os.getenv("LLM_CACHE", "on").lower(), ""))
+
+
+def download_button(data: QueryResult, key: str) -> None:
+    st.download_button(
+        texts.DOWNLOAD_CSV,
+        data=view.to_csv(data),
+        file_name=f"indaga-{key[:8]}.csv",
+        mime="text/csv",
+        key=f"csv-{key}",
+        icon=":material/download:",
+    )
+
+
+def render_result(response: AgentResponse) -> None:
+    """Titled card: chart or table, then the Gráfico/Tabela switch and the CSV download."""
+    data = response.data
+    if data is None:
+        return
+    if data.row_count == 0:
+        st.caption(texts.NO_ROWS)
+        return
+    chart = view.drawable(response.chart, data)
+    key = response.trace_id or str(id(response))
+    with st.container(border=True, key=style.result_key(key)):
+        if chart.type == "metric":
+            st.metric(label=view.result_title(chart, data), value=view.metric_value(chart, data))
+            with st.container(horizontal=True, horizontal_alignment="right"):
+                download_button(data, key)
+            return
+        default = texts.VIEW_CHART if chart.type in ("bar", "line") else texts.VIEW_TABLE
+        if chart.type == "table":
+            chart = view.drawable(view.infer_chart(data), data)
+        st.markdown(f"**{view.result_title(chart, data)}**")
+        st.caption(view.row_caption(data))
+        body = st.container()
+        with st.container(horizontal=True, horizontal_alignment="distribute", vertical_alignment="center"):
+            mode = texts.VIEW_TABLE
+            if chart.type in ("bar", "line"):
+                picked = st.segmented_control(
+                    "Visualização",
+                    [texts.VIEW_CHART, texts.VIEW_TABLE],
+                    default=default,
+                    key=f"view-{key}",
+                    label_visibility="collapsed",
+                )
+                mode = picked or default
+            download_button(data, key)
+        spec = view.build_chart(chart, data) if mode == texts.VIEW_CHART else None
+        with body:
+            if spec is not None:
+                st.altair_chart(spec, theme=None, width="stretch")
+            else:
+                st.dataframe(view.display_records(data), hide_index=True, width="stretch")
+
+
+def render_step(rt: Runtime, step: Step) -> None:
+    title = f"**{step.index}. {texts.STEP_LABEL.get(step.kind, step.kind)}**"
+    if step.row_count is not None:
+        rows = "linha" if step.row_count == 1 else "linhas"
+        title += f" · {step.row_count} {rows} · {step.elapsed_ms:.0f} ms"
+    st.markdown(title)
+    if step.thought:
+        st.caption(step.thought)
+    if step.sql and step.kind == "query":
+        graph = query_graph.extract(step.sql, rt.columns)
+        if graph is not None:
+            st.graphviz_chart(query_graph.to_dot(graph, step.row_count))
+            st.caption(texts.GRAPH_CAPTION)
+    if step.sql:
+        st.code(step.sql, language="sql", wrap_lines=True)
+    if step.error:
+        st.markdown(f":red[{step.error}]")
+
+
+def render_reasoning(rt: Runtime, response: AgentResponse) -> None:
+    queries = sum(1 for s in response.steps if s.kind in ("query", "query_error"))
+    parts = [texts.REASONING]
+    if queries:
+        parts.append(f"{queries} {'consulta' if queries == 1 else 'consultas'}")
+    parts.append(f"{response.llm_calls} {'chamada' if response.llm_calls == 1 else 'chamadas'} ao modelo")
+    parts.append("< 1 s" if response.latency_ms < 1000 else f"{response.latency_ms / 1000:.0f} s")
+    with st.expander(" · ".join(parts), icon=":material/account_tree:"):
+        for step in response.steps:
+            render_step(rt, step)
+        st.caption(
+            f"{response.model or 'sem modelo'} · {response.cache_hits} de {response.llm_calls} chamadas do cache · "
+            f"{response.usage.input_tokens}+{response.usage.output_tokens} tokens · trace `{response.trace_id}`"
+        )
+
+
+def render_response(response: AgentResponse, rt: Runtime) -> None:
+    badges = []
+    if response.status != "answered":
+        badges.append(f":red-badge[{texts.STATUS_LABEL[response.status]}]")
+    if response.corrections:
+        badges.append(f":orange-badge[Autocorrigida: {response.corrections}]")
+    if badges:
+        st.markdown(" ".join(badges))
+    st.markdown(response.answer)
+    for assumption in response.assumptions:
+        st.markdown(f":orange-badge[{texts.ASSUMPTION}] {assumption}")
+    if rt.assistant is not None:
+        for note in view.quality_notes(response, rt.assistant.dictionary):
+            st.caption(f":orange[⚠] {note}")
+    render_result(response)
+    render_reasoning(rt, response)
+
+
+def render_welcome(rt: Runtime, asked: set[str]) -> str | None:
+    """Assistant's first message: scope, data coverage and the five suggested questions."""
+    pending = None
+    with st.container(key=style.WELCOME), st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
+        if rt.error:
+            st.error(texts.MISSING_KEY.format(error=rt.error), icon=":material/key_off:")
+        text = texts.WELCOME
+        if rt.coverage:
+            start, end = (view.br_date(d) for d in rt.coverage)
+            text += " " + texts.WELCOME_COVERAGE.format(start=start, end=end)
+        st.markdown(text)
+        if rt.assistant is None:
+            return None
+        st.markdown(texts.WELCOME_SUGGESTIONS)
+        columns = st.container(key=style.SUGGESTIONS).columns(2)
+        suggestions = zip(texts.SUGGESTED_QUESTIONS, texts.SUGGESTION_LABELS, strict=True)
+        for i, (question, (kind, short)) in enumerate(suggestions):
+            icon = ":material/check:" if question in asked else ":material/arrow_outward:"
+            with columns[i % 2]:
+                if st.button(f"**{kind}** · {short}", key=f"suggest-{i}", icon=icon, help=question, width="stretch"):
+                    pending = question
+    return pending
+
+
+def user_bubble(question: str, turn: int | str) -> None:
+    """The user's question as a right-aligned bubble (alignment from the API, paint from style.css).
+
+    The fixed space on the left keeps long questions from spanning the full width, like a chat.
+    """
+    with st.container(horizontal=True, horizontal_alignment="right"):
+        st.space(USER_BUBBLE_INDENT_PX)
+        with st.container(key=style.user_key(turn), width="content"):
+            st.markdown(question)
+
+
+def ask(rt: Runtime, question: str) -> None:
+    if rt.assistant is None:  # the input is disabled in this case
+        return
+    user_bubble(question, "pending")
+    with (
+        st.container(key=style.bot_key("pending")),
+        st.chat_message("assistant", avatar=ASSISTANT_AVATAR),
+        st.spinner(texts.LOADING),
+    ):
+        response = rt.assistant.ask(question)
+    st.session_state.history.append(response)
+    st.session_state.show_ask_tab = True  # applied before the tabs are created on the rerun
+    st.rerun()
+
+
+def render_ask_tab(rt: Runtime) -> None:
+    history: list[AgentResponse] = st.session_state.history
+    pending = render_welcome(rt, {r.question for r in history})
+    for turn, response in enumerate(history):
+        user_bubble(response.question, turn)
+        with st.container(key=style.bot_key(turn)), st.chat_message("assistant", avatar=ASSISTANT_AVATAR):
+            render_response(response, rt)
+    typed = st.chat_input(texts.INPUT_PLACEHOLDER, disabled=rt.assistant is None)
+    question = typed or pending
+    if question:
+        ask(rt, question)
+
+
+def render_traces_tab(rt: Runtime) -> None:
+    st.caption(texts.TRACES_CAPTION.format(path=rt.settings.trace_path.name))
+    traces = rt.tracer.tail(30)
+    if not traces:
+        st.caption(texts.TRACES_EMPTY)
+        return
+    st.dataframe(view.trace_table(traces), hide_index=True, width="stretch")
+    with st.expander("Último registro completo (JSON)"):
+        st.json(traces[-1])
+
+
+def main() -> None:
+    rt = runtime()
+    st.html(style.CSS_PATH)
+    st.session_state.setdefault("history", [])
+    render_sidebar(rt)
+    st.title(texts.APP_TITLE, anchor=False)
+    st.caption(texts.SUBTITLE)
+    if st.session_state.pop("show_ask_tab", False):
+        st.session_state["main_tab"] = texts.TAB_ASK
+    tab_ask, tab_traces = st.tabs(
+        [texts.TAB_ASK, texts.TAB_TRACES], default=texts.TAB_ASK, key="main_tab", on_change="rerun"
+    )
+    with tab_ask:
+        render_ask_tab(rt)
+    with tab_traces:
+        render_traces_tab(rt)
+
+
+main()
