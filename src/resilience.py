@@ -1,0 +1,239 @@
+"""Quota-aware wrappers around a ``StructuredLLM``.
+
+Composition built by ``get_llm()`` (outermost first)::
+
+    FallbackLLM([CachedLLM(ResilientLLM(GeminiLLM(model_a))), CachedLLM(ResilientLLM(GeminiLLM(model_b)))])
+
+- ``CachedLLM``: identical prompt → stored decision, zero API calls (temperature 0 makes replay valid).
+- ``ResilientLLM``: client-side RPM limiter, backoff on transient errors and per-minute 429s,
+  and a persisted "daily quota exhausted" mark so later runs skip the model until reset.
+- ``FallbackLLM``: Gemini quotas are per model, so the next model gets a fresh budget.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import threading
+import time
+from collections import deque
+from collections.abc import Callable, Sequence
+from dataclasses import replace
+from datetime import datetime, timedelta
+from datetime import time as dtime
+from pathlib import Path
+from typing import Literal
+from zoneinfo import ZoneInfo
+
+from langchain_core.messages import BaseMessage
+
+from src.agent.models import AgentDecision, TokenUsage
+from src.llm import LLMError, LLMReply, RateLimitError, StructuredLLM, TransientLLMError
+
+PACIFIC = ZoneInfo("America/Los_Angeles")  # Gemini daily quotas reset at midnight Pacific time
+
+
+class CacheMiss(LLMError):
+    """Replay mode found no stored answer for this prompt."""
+
+
+def next_quota_reset(now: float) -> float:
+    local = datetime.fromtimestamp(now, PACIFIC)
+    return datetime.combine((local + timedelta(days=1)).date(), dtime(0), PACIFIC).timestamp()
+
+
+class RateLimiter:
+    """Sliding one-minute window: blocks until a new request fits under ``rpm``."""
+
+    def __init__(
+        self,
+        rpm: int,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.rpm = rpm
+        self._clock, self._sleep = clock, sleep
+        self._sent: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            while True:
+                now = self._clock()
+                while self._sent and now - self._sent[0] >= 60.0:
+                    self._sent.popleft()
+                if len(self._sent) < self.rpm:
+                    self._sent.append(now)
+                    return
+                self._sleep(60.0 - (now - self._sent[0]) + 0.05)
+
+
+class QuotaStore:
+    """Remembers, on disk, which models exhausted their daily quota and until when."""
+
+    def __init__(self, path: Path | None, *, clock: Callable[[], float] = time.time) -> None:
+        self.path, self._clock = path, clock
+        self._memory: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def _load(self) -> dict[str, float]:
+        if self.path is None or not self.path.is_file():
+            return dict(self._memory)
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return dict(self._memory)
+        return {str(k): float(v) for k, v in raw.items()}
+
+    def exhausted_until(self, model: str) -> float | None:
+        until = self._load().get(model)
+        return until if until is not None and until > self._clock() else None
+
+    def mark_exhausted(self, model: str) -> None:
+        with self._lock:
+            data = self._load()
+            data[model] = next_quota_reset(self._clock())
+            self._memory = data
+            if self.path is not None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+class ResilientLLM:
+    def __init__(
+        self,
+        inner: StructuredLLM,
+        *,
+        rpm: int,
+        quota: QuotaStore | None = None,
+        max_attempts: int = 3,
+        base_delay_s: float = 2.0,
+        max_delay_s: float = 60.0,
+        sleep: Callable[[float], None] = time.sleep,
+        limiter: RateLimiter | None = None,
+    ) -> None:
+        self.inner = inner
+        self.quota = quota
+        self.max_attempts = max_attempts
+        self.base_delay_s, self.max_delay_s = base_delay_s, max_delay_s
+        self._sleep = sleep
+        self.limiter = limiter or RateLimiter(rpm, sleep=sleep)
+
+    @property
+    def model_name(self) -> str:
+        return self.inner.model_name
+
+    def decide(self, messages: Sequence[BaseMessage]) -> LLMReply:
+        model = self.model_name
+        if self.quota is not None and self.quota.exhausted_until(model) is not None:
+            raise RateLimitError(f"{model}: cota diária já esgotada hoje", daily=True)
+        last: LLMError | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            self.limiter.acquire()
+            try:
+                return self.inner.decide(messages)
+            except RateLimitError as err:
+                if err.daily or (err.retry_after is not None and err.retry_after > self.max_delay_s):
+                    if self.quota is not None:
+                        self.quota.mark_exhausted(model)
+                    raise
+                last, delay = err, err.retry_after or self.base_delay_s * 2 ** (attempt - 1)
+            except TransientLLMError as err:
+                last, delay = err, self.base_delay_s * 2 ** (attempt - 1)
+            if attempt < self.max_attempts:
+                self._sleep(min(delay, self.max_delay_s))
+        raise last or LLMError(f"{model}: nenhuma tentativa realizada")
+
+
+class FallbackLLM:
+    """Tries each model in order; any ``LLMError`` moves on to the next one."""
+
+    def __init__(self, chain: Sequence[StructuredLLM]) -> None:
+        if not chain:
+            raise ValueError("FallbackLLM needs at least one model")
+        self.chain = list(chain)
+
+    @property
+    def model_name(self) -> str:
+        return self.chain[0].model_name
+
+    def decide(self, messages: Sequence[BaseMessage]) -> LLMReply:
+        errors: list[str] = []
+        for llm in self.chain:
+            try:
+                return llm.decide(messages)
+            except LLMError as err:
+                errors.append(str(err))
+        raise LLMError("nenhum modelo disponível: " + " | ".join(errors))
+
+
+def prompt_key(model: str, messages: Sequence[BaseMessage]) -> str:
+    payload = {
+        "model": model,
+        "schema": AgentDecision.model_json_schema(),
+        "messages": [[m.type, m.content] for m in messages],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+class CachedLLM:
+    """Disk cache keyed by model + full prompt + output schema.
+
+    ``mode="on"`` reads and writes; ``mode="replay"`` only reads and raises ``CacheMiss``
+    instead of calling the provider (develop the UI or rerun tests with zero quota).
+    Stored decisions may quote query results, so the cache lives in the git-ignored ``.cache/``.
+    """
+
+    def __init__(self, inner: StructuredLLM, cache_dir: Path, *, mode: Literal["on", "replay"] = "on") -> None:
+        self.inner, self.cache_dir, self.mode = inner, cache_dir, mode
+
+    @property
+    def model_name(self) -> str:
+        return self.inner.model_name
+
+    def _path(self, messages: Sequence[BaseMessage]) -> Path:
+        return self.cache_dir / self.model_name / f"{prompt_key(self.model_name, messages)}.json"
+
+    def decide(self, messages: Sequence[BaseMessage]) -> LLMReply:
+        path = self._path(messages)
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return LLMReply(
+                    decision=AgentDecision.model_validate(data["decision"]),
+                    usage=TokenUsage.model_validate(data["usage"]),
+                    model=str(data["model"]),
+                    cached=True,
+                )
+            except (OSError, ValueError, KeyError):
+                pass  # corrupt entry: fall through and refresh it
+        if self.mode == "replay":
+            raise CacheMiss(f"{self.model_name}: pergunta fora do cache (LLM_CACHE=replay)")
+        reply = self.inner.decide(messages)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps(
+                {"decision": reply.decision.model_dump(), "usage": reply.usage.model_dump(), "model": reply.model},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+        return replace(reply, cached=False)
+
+
+class OfflineLLM:
+    """Placeholder provider for replay mode: never touches the network."""
+
+    def __init__(self, model: str) -> None:
+        self._model = model
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    def decide(self, messages: Sequence[BaseMessage]) -> LLMReply:
+        raise CacheMiss(f"{self._model}: modo offline, sem chamada à API")

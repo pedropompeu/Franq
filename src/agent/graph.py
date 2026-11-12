@@ -34,6 +34,8 @@ class AgentState(TypedDict):
     decision: AgentDecision | None
     corrections: int
     llm_calls: int
+    cache_hits: int
+    model: str
     usage: TokenUsage
     response: AgentResponse | None
 
@@ -123,11 +125,16 @@ class Assistant:
             return {
                 "steps": failed,
                 "llm_calls": state["llm_calls"] + 1,
-                "response": self._fail({**state, "steps": failed}, "Não consegui consultar o modelo de linguagem."),
+                "response": self._fail(
+                    {**state, "steps": failed, "llm_calls": state["llm_calls"] + 1},
+                    "Não consegui consultar o modelo de linguagem.",
+                ),
             }
         return {
             "decision": reply.decision,
             "llm_calls": state["llm_calls"] + 1,
+            "cache_hits": state["cache_hits"] + int(reply.cached),
+            "model": reply.model,
             "usage": state["usage"].add(reply.usage),
         }
 
@@ -266,6 +273,8 @@ class Assistant:
             "decision": None,
             "corrections": 0,
             "llm_calls": 0,
+            "cache_hits": 0,
+            "model": "",
             "usage": TokenUsage(),
             "response": None,
         }
@@ -274,7 +283,8 @@ class Assistant:
         response = response.model_copy(
             update={
                 "latency_ms": round((time.monotonic() - started) * 1000, 1),
-                "model": self.llm.model_name,
+                "model": final["model"] or self.llm.model_name,
+                "cache_hits": final["cache_hits"],
                 "trace_id": uuid.uuid4().hex[:12],
             }
         )

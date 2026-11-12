@@ -40,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
         for row in response.data.rows[:20]:
             print(" | ".join(str(v) for v in row))
     print(
-        f"\n{response.llm_calls} chamadas ao LLM · {response.corrections} correções · "
+        f"\n{response.llm_calls} chamadas ao LLM ({response.cache_hits} do cache) · "
+        f"{response.corrections} correções · "
         f"{response.usage.input_tokens}+{response.usage.output_tokens} tokens · {response.latency_ms:.0f} ms · "
         f"trace {response.trace_id}"
     )

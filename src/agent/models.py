@@ -83,6 +83,7 @@ class AgentResponse(BaseModel):
     steps: list[Step] = Field(default_factory=list)
     corrections: int = 0
     llm_calls: int = 0
+    cache_hits: int = 0  # decisions served from the local cache (no API call)
     usage: TokenUsage = Field(default_factory=TokenUsage)
     latency_ms: float = 0.0
     model: str = ""

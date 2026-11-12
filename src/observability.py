@@ -25,6 +25,7 @@ def trace_record(response: AgentResponse) -> dict[str, Any]:
         "model": response.model,
         "latency_ms": response.latency_ms,
         "llm_calls": response.llm_calls,
+        "cache_hits": response.cache_hits,
         "corrections": response.corrections,
         "usage": response.usage.model_dump(),
         "chart": response.chart.model_dump(),

@@ -1,24 +1,44 @@
 """LLM provider layer. The graph depends only on the ``StructuredLLM`` protocol.
 
-Resilience (retry with backoff, fallback model, circuit breaker, rate limiting) is added
-on Day 4 inside this module, without touching the graph.
+Quota handling (cache, rate limiting, retry, fallback across models) lives in
+``src/resilience.py`` and is assembled by ``get_llm()``; the graph never sees it.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+import re
+import warnings
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel
 
 from src.agent.models import AgentDecision, TokenUsage
+from src.config import PROJECT_ROOT
+
+# Free tier (AI Studio, checked 2026-11-12): both 15 RPM / 500 RPD, with separate quotas per model.
+DEFAULT_GEMINI_MODELS = "gemini-3.5-flash-lite:15,gemini-3.1-flash-lite:15"
+DEFAULT_RPM = 5  # conservative when a model is listed without ":rpm"
 
 
 class LLMError(Exception):
     """Any failure to obtain a valid structured decision from the provider."""
+
+
+class RateLimitError(LLMError):
+    """HTTP 429. ``daily`` means the per-day quota is gone; otherwise wait ``retry_after`` seconds."""
+
+    def __init__(self, message: str, *, daily: bool = False, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.daily, self.retry_after = daily, retry_after
+
+
+class TransientLLMError(LLMError):
+    """Timeouts and 5xx: worth retrying with backoff."""
 
 
 @dataclass(frozen=True)
@@ -26,6 +46,7 @@ class LLMReply:
     decision: AgentDecision
     usage: TokenUsage
     model: str
+    cached: bool = False
 
 
 class StructuredLLM(Protocol):
@@ -42,6 +63,38 @@ def _usage_from(raw: Any) -> TokenUsage:
     return TokenUsage(input_tokens=int(meta.get("input_tokens", 0)), output_tokens=int(meta.get("output_tokens", 0)))
 
 
+def _chain(err: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = set()
+    current: BaseException | None = err
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+_RETRY_RE = re.compile(r"retry(?:Delay)?[^0-9]{0,8}(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+_TRANSIENT_MARKERS = ("UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "timed out", "Timeout", "overloaded")
+
+
+def classify_error(err: BaseException, model: str) -> LLMError:
+    """Map provider exceptions to retry semantics without depending on SDK exception classes."""
+    chain = list(_chain(err))
+    text = " ".join(f"{type(e).__name__}: {e}" for e in chain)
+    codes = {getattr(e, attr, None) for e in chain for attr in ("code", "status_code")}
+    if 429 in codes or "RESOURCE_EXHAUSTED" in text or "429" in text:
+        match = _RETRY_RE.search(text)
+        return RateLimitError(
+            f"{model}: limite de requisições (429)",
+            daily="PerDay" in text,
+            retry_after=float(match.group(1)) if match else None,
+        )
+    if codes & {500, 502, 503, 504} or any(isinstance(e, TimeoutError) for e in chain):
+        return TransientLLMError(f"{model}: erro temporário do provedor")
+    if any(marker in text for marker in _TRANSIENT_MARKERS):
+        return TransientLLMError(f"{model}: erro temporário do provedor")
+    return LLMError(f"{model}: {type(err).__name__}: {err}")
+
+
 class GeminiLLM:
     """Gemini through langchain-google-genai, temperature 0, JSON-schema structured output."""
 
@@ -54,7 +107,7 @@ class GeminiLLM:
             google_api_key=api_key,
             temperature=0,
             timeout=timeout_s,
-            max_retries=0,  # retries are owned by this module (Day 4), not hidden in the SDK
+            max_retries=0,  # retries are owned by ResilientLLM, not hidden in the SDK
         )
         self._runnable = chat.with_structured_output(AgentDecision, include_raw=True)
 
@@ -64,14 +117,17 @@ class GeminiLLM:
 
     def decide(self, messages: Sequence[BaseMessage]) -> LLMReply:
         try:
-            out = self._runnable.invoke(list(messages))
-        except Exception as err:  # provider/network errors surface as LLMError
-            raise LLMError(f"{type(err).__name__}: {err}") from err
+            with warnings.catch_warnings():
+                # Gemini 3.x Lite ignores temperature ("fixed sampling defaults"); the cache gives replayability.
+                warnings.filterwarnings("ignore", message=".*fixed sampling defaults.*", category=UserWarning)
+                out = self._runnable.invoke(list(messages))
+        except Exception as err:  # provider/network errors surface as typed LLMErrors
+            raise classify_error(err, self._model) from err
         if not isinstance(out, dict):
-            raise LLMError("resposta inesperada do provedor")
+            raise LLMError(f"{self._model}: resposta inesperada do provedor")
         parsed = out.get("parsed")
         if out.get("parsing_error") is not None or not isinstance(parsed, BaseModel):
-            raise LLMError(f"resposta vazia ou fora do schema: {out.get('parsing_error')}")
+            raise LLMError(f"{self._model}: resposta vazia ou fora do schema: {out.get('parsing_error')}")
         return LLMReply(
             decision=AgentDecision.model_validate(parsed.model_dump()),
             usage=_usage_from(out.get("raw")),
@@ -79,12 +135,45 @@ class GeminiLLM:
         )
 
 
+def parse_model_specs(raw: str) -> list[tuple[str, int]]:
+    """``"model-a:15,model-b"`` → ``[("model-a", 15), ("model-b", DEFAULT_RPM)]``."""
+    specs: list[tuple[str, int]] = []
+    for item in raw.split(","):
+        name, _, rpm = item.strip().partition(":")
+        if name:
+            specs.append((name.strip(), int(rpm) if rpm.strip() else DEFAULT_RPM))
+    if not specs:
+        raise LLMError("nenhum modelo configurado em GEMINI_MODELS")
+    return specs
+
+
 def get_llm() -> StructuredLLM:
-    """Build the provider selected by ``LLM_PROVIDER`` (default: gemini)."""
+    """Assemble the provider chain from the environment.
+
+    - ``GEMINI_MODELS``: ordered fallback list, ``model[:rpm]`` separated by commas.
+    - ``LLM_CACHE``: ``on`` (default), ``off`` or ``replay`` (cache only, never calls the API).
+    """
+    from src.resilience import CachedLLM, FallbackLLM, OfflineLLM, QuotaStore, ResilientLLM
+
     provider = os.getenv("LLM_PROVIDER", "gemini").lower()
-    if provider == "gemini":
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        if not api_key:
-            raise LLMError("GOOGLE_API_KEY não definida. Copie .env.example para .env e preencha a chave.")
-        return GeminiLLM(model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), api_key=api_key)
-    raise LLMError(f"LLM_PROVIDER desconhecido: {provider!r}")
+    if provider != "gemini":
+        raise LLMError(f"LLM_PROVIDER desconhecido: {provider!r}")
+    specs = parse_model_specs(os.getenv("GEMINI_MODELS") or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODELS)
+    cache_mode = os.getenv("LLM_CACHE", "on").lower()
+    if cache_mode not in ("on", "off", "replay"):
+        raise LLMError(f"LLM_CACHE inválido: {cache_mode!r} (use on, off ou replay)")
+    cache_dir = Path(os.getenv("LLM_CACHE_DIR", PROJECT_ROOT / ".cache" / "llm"))
+
+    api_key = os.getenv("GOOGLE_API_KEY", "")
+    if cache_mode != "replay" and not api_key:
+        raise LLMError("GOOGLE_API_KEY não definida. Copie .env.example para .env e preencha a chave.")
+
+    quota = QuotaStore(cache_dir / "quota.json")
+    chain: list[StructuredLLM] = []
+    for model, rpm in specs:
+        if cache_mode == "replay":
+            chain.append(CachedLLM(OfflineLLM(model), cache_dir, mode="replay"))
+            continue
+        llm: StructuredLLM = ResilientLLM(GeminiLLM(model, api_key), rpm=rpm, quota=quota)
+        chain.append(CachedLLM(llm, cache_dir) if cache_mode == "on" else llm)
+    return chain[0] if len(chain) == 1 else FallbackLLM(chain)
