@@ -1,0 +1,19 @@
+# docker compose up → http://localhost:8501
+# Única configuração obrigatória: GOOGLE_API_KEY no arquivo .env (copie de .env.example).
+services:
+  app:
+    build: .
+    image: assistente-dados
+    ports:
+      - "8501:8501"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - llm-cache:/app/.cache
+      - traces:/app/traces
+    restart: unless-stopped
+
+volumes:
+  llm-cache:
+  traces:
