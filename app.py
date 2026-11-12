@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import streamlit as st
 
@@ -24,7 +25,7 @@ from src.db.tools import QueryResult, discover_schema
 from src.llm import LLMError, get_llm
 from src.observability import Tracer
 from src.semantic.dictionary import load_dictionary
-from src.ui import query_graph, style, texts, view
+from src.ui import data_graph, query_graph, style, texts, view
 
 ASSISTANT_AVATAR = ":material/query_stats:"
 USER_BUBBLE_INDENT_PX = 96
@@ -250,6 +251,49 @@ def render_ask_tab(rt: Runtime) -> None:
         ask(rt, question)
 
 
+@st.cache_data(show_spinner=False)
+def graph_memberships(db_path: str, modified: float, keys: tuple[str, ...]) -> data_graph.Memberships:
+    """Cached per database file and modification time, like the schema discovery."""
+    dims = [d for d in data_graph.DIMENSIONS if d.key in keys]
+    return data_graph.load_memberships(Path(db_path), dims)
+
+
+@st.cache_data(show_spinner=False)
+def graph_page(db_path: str, modified: float, keys: tuple[str, ...], min_clients: int) -> tuple[str, int, int]:
+    dims = [d for d in data_graph.DIMENSIONS if d.key in keys]
+    graph = data_graph.build(graph_memberships(db_path, modified, keys), dims, min_clients)
+    return data_graph.to_html(graph, dims), len(graph.nodes), len(graph.edges)
+
+
+def render_graph_tab(rt: Runtime) -> None:
+    st.caption(texts.GRAPH_INTRO)
+    dims = data_graph.available(rt.columns)
+    by_label = {d.label: d for d in dims}
+    with st.container(horizontal=True, vertical_alignment="bottom"):
+        picked = st.multiselect(
+            texts.GRAPH_DIMENSIONS,
+            list(by_label),
+            default=[d.label for d in dims if d.key in data_graph.DEFAULT_SELECTION],
+            key="graph-dims",
+        )
+        min_clients = st.slider(texts.GRAPH_MIN_CLIENTS, 1, 10, 3, key="graph-min", width=260)
+    chosen = [by_label[label] for label in picked]
+    if len(chosen) < 2:
+        st.caption(texts.GRAPH_PICK_TWO)
+        return
+    db = rt.settings.db_path
+    keys = tuple(d.key for d in chosen)
+    page, nodes, edges = graph_page(str(db), db.stat().st_mtime, keys, min_clients)
+    st.caption(texts.GRAPH_SUMMARY.format(nodes=nodes, edges=edges))
+    if edges == 0:
+        st.caption(texts.GRAPH_EMPTY)
+        return
+    st.iframe(page, height=data_graph.HEIGHT_PX + 50)
+    with st.expander(texts.GRAPH_TABLE, icon=":material/table_rows:"):
+        graph = data_graph.build(graph_memberships(str(db), db.stat().st_mtime, keys), chosen, min_clients)
+        st.dataframe(data_graph.strongest(graph), hide_index=True, width="stretch")
+
+
 def render_traces_tab(rt: Runtime) -> None:
     st.caption(texts.TRACES_CAPTION.format(path=rt.settings.trace_path.name))
     traces = rt.tracer.tail(30)
@@ -270,11 +314,14 @@ def main() -> None:
     st.caption(texts.SUBTITLE)
     if st.session_state.pop("show_ask_tab", False):
         st.session_state["main_tab"] = texts.TAB_ASK
-    tab_ask, tab_traces = st.tabs(
-        [texts.TAB_ASK, texts.TAB_TRACES], default=texts.TAB_ASK, key="main_tab", on_change="rerun"
+    tab_ask, tab_graph, tab_traces = st.tabs(
+        [texts.TAB_ASK, texts.TAB_GRAPH, texts.TAB_TRACES], default=texts.TAB_ASK, key="main_tab", on_change="rerun"
     )
     with tab_ask:
         render_ask_tab(rt)
+    if tab_graph.open:  # the graph page is ~700 KB; send it only while the tab is visible
+        with tab_graph:
+            render_graph_tab(rt)
     with tab_traces:
         render_traces_tab(rt)
 

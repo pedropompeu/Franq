@@ -8,3 +8,4 @@ langchain-google-genai==4.5.0
 google-genai==3.3.0
 streamlit==1.67.0
 altair==6.3.0  # specs de gráfico (usado diretamente em src/ui/view.py)
+pyvis==0.3.2  # aba "Visão em grafo" (vis-network com JS embutido, sem CDN)

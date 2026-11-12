@@ -34,7 +34,7 @@ Pela linha de comando:
 Verificações e avaliação:
 
 ```bash
-make check                  # ruff + formatação + mypy estrito + 177 testes (não usa a API)
+make check                  # ruff + formatação + mypy estrito + 185 testes (não usa a API)
 make eval ARGS="--repeat 3" # avaliação com o Gemini real (gasta cota gratuita)
 ```
 
@@ -62,6 +62,12 @@ flowchart LR
 5. **Interface.** Streamlit mostra métrica, tabela ou gráfico (com download em CSV) e um painel "Como cheguei a esta resposta" com cada consulta, o grafo das tabelas e colunas usadas, a SQL e o custo em chamadas e tokens.
 
 ![Raciocínio: grafo da consulta, SQL e resposta](docs/img/raciocinio.png)
+
+### Visão em grafo
+
+A aba **Visão em grafo** mostra como estados, categorias de compra, canais de compra, canais de suporte e campanhas se ligam pelos mesmos clientes. Cada nó é um valor de uma dimensão, com tamanho proporcional ao número de clientes; cada ligação conta os clientes que têm as duas coisas. O grafo sai direto do SQLite, sem Neo4j e sem o LLM, e só mostra contagens: `nome` e `email` nunca são lidos. As dimensões vêm do schema real, e uma tabela com as ligações mais fortes acompanha o desenho. Renderizado com [pyvis](https://pyvis.readthedocs.io/) com o JavaScript embutido, sem CDN.
+
+![Visão em grafo: estados e categorias de compra ligados por clientes em comum](docs/img/grafo.png)
 
 ### Armadilhas dos dados que o assistente trata
 
@@ -139,6 +145,7 @@ src/
   observability.py         rastros JSONL
   evaluation.py            avaliação por acerto de execução
   ui/                      componentes, textos, tema, grafo da consulta
+  ui/data_graph.py         aba "Visão em grafo" (pyvis, só agregados)
   cli.py                   uso pela linha de comando
 tests/unit/                testes com LLM falso e determinístico
 tests/eval/questions.yaml  perguntas de referência
@@ -147,7 +154,7 @@ docs/                      ADRs, avaliação, arquitetura do Desafio 2
 
 ## Decisões de arquitetura
 
-Os ADRs estão em [`docs/adr/`](docs/adr/README.md). O banco de grafos (Neo4j) ficou de fora: são 4 tabelas pequenas num SQLite exigido pelo desafio ([ADR 0002](docs/adr/0002-sqlite-sem-grafo.md)). O grafo aparece onde ajuda a ler, no desenho de cada consulta.
+Os ADRs estão em [`docs/adr/`](docs/adr/README.md). O banco de grafos (Neo4j) ficou de fora: são 4 tabelas pequenas num SQLite exigido pelo desafio ([ADR 0002](docs/adr/0002-sqlite-sem-grafo.md)). O grafo aparece onde ajuda a ler: no desenho de cada consulta e na aba "Visão em grafo", montada do próprio SQLite.
 
 ## Melhorias possíveis
 
@@ -156,7 +163,7 @@ Os ADRs estão em [`docs/adr/`](docs/adr/README.md). O banco de grafos (Neo4j) f
 - **Catálogo semântico maior**, com sinônimos e métricas aprovadas pela área de negócio.
 - **Mais perguntas de avaliação**, incluindo perguntas reais de usuários, e execução agendada da avaliação.
 - **Pseudonimização também de nomes digitados** que não estão no banco (detecção de entidades).
-- **Grafo de dados** (Neo4j ou similar) se o modelo crescer para muitas entidades e relações.
+- **Banco de grafos** (Neo4j ou similar) só se o modelo crescer para muitas entidades e relações; hoje a visão em grafo sai do SQLite.
 
 ## O que aprendi e o que mudei
 

@@ -82,7 +82,19 @@ SIDEBAR_CACHE_MODE: Final = {
 }
 
 TAB_ASK: Final = "Perguntar"
+TAB_GRAPH: Final = "Visão em grafo"
 TAB_TRACES: Final = "Rastros"
+GRAPH_INTRO: Final = (
+    "Como estados, compras, suporte e campanhas se ligam pelos mesmos clientes. Cada ligação conta os "
+    "clientes que têm as duas coisas, não necessariamente na mesma compra ou no mesmo contato. "
+    "Arraste os nós, use a roda do mouse para o zoom e passe o mouse para ver os números."
+)
+GRAPH_DIMENSIONS: Final = "Mostrar"
+GRAPH_MIN_CLIENTS: Final = "Mínimo de clientes por ligação"
+GRAPH_PICK_TWO: Final = "Escolha pelo menos duas dimensões para ver as ligações."
+GRAPH_SUMMARY: Final = "{nodes} nós · {edges} ligações · nenhum dado pessoal: só contagens de clientes."
+GRAPH_TABLE: Final = "Ligações mais fortes"
+GRAPH_EMPTY: Final = "Nenhuma ligação com esse mínimo. Diminua o mínimo de clientes."
 TRACES_EMPTY: Final = "Nenhuma pergunta registrada ainda."
 TRACES_CAPTION: Final = (
     "Um registro por pergunta em `{path}`: passos, SQL, erros, tokens e latência. Sem linhas de resultado."
