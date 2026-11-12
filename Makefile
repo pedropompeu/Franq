@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: install lint typecheck test check run
+.PHONY: install lint typecheck test check run eval
 
 install:
 	python3 -m venv .venv
@@ -20,3 +20,7 @@ check: lint typecheck test
 
 run:
 	$(PY) -m streamlit run app.py
+
+# Avaliação com o Gemini real (gasta cota): make eval ARGS="--repeat 3"
+eval:
+	$(PY) -m src.evaluation $(ARGS)
