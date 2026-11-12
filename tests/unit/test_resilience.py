@@ -2,15 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableLambda
 
 from src.agent.models import AgentDecision, TokenUsage
-from src.llm import LLMError, LLMReply, RateLimitError, TransientLLMError, classify_error, get_llm, parse_model_specs
+from src.llm import (
+    GeminiLLM,
+    LLMError,
+    LLMReply,
+    RateLimitError,
+    TransientLLMError,
+    classify_error,
+    get_llm,
+    parse_model_specs,
+)
 from src.resilience import (
     PACIFIC,
     CachedLLM,
@@ -19,6 +30,7 @@ from src.resilience import (
     QuotaStore,
     RateLimiter,
     ResilientLLM,
+    equal_jitter,
     next_quota_reset,
 )
 
@@ -90,6 +102,33 @@ def test_classify_other_is_plain_llm_error() -> None:
     assert type(out) is LLMError
 
 
+def _gemini_returning(*outputs: Mapping[str, object]) -> GeminiLLM:
+    """A GeminiLLM whose provider call is replaced by scripted outputs (no SDK client, no network)."""
+    script = list(outputs)
+
+    def reply(_: Any) -> dict[Any, Any]:
+        return dict(script.pop(0))
+
+    llm = GeminiLLM.__new__(GeminiLLM)
+    llm._model = "m"
+    llm._runnable = RunnableLambda(reply)
+    return llm
+
+
+def test_empty_gemini_response_is_transient_and_retried() -> None:
+    empty = {"raw": AIMessage(content=""), "parsed": None, "parsing_error": None}
+    good = {"raw": AIMessage(content="{}"), "parsed": DECISION, "parsing_error": None}
+    with pytest.raises(TransientLLMError, match="resposta vazia"):
+        _gemini_returning(empty).decide(MESSAGES)
+
+    clock = FakeClock()
+    limiter = RateLimiter(100, clock=clock)
+    retried = ResilientLLM(
+        _gemini_returning(empty, good), rpm=100, sleep=clock.sleep, limiter=limiter, jitter=lambda d: d
+    )
+    assert retried.decide(MESSAGES).decision == DECISION and clock.sleeps == [2.0]
+
+
 def test_parse_model_specs() -> None:
     assert parse_model_specs("a:15, b") == [("a", 15), ("b", 5)]
     with pytest.raises(LLMError):
@@ -113,7 +152,8 @@ def test_rate_limiter_waits_for_the_window() -> None:
 
 
 def _resilient(inner: ScriptedLLM, clock: FakeClock, quota: QuotaStore | None = None) -> ResilientLLM:
-    return ResilientLLM(inner, rpm=100, quota=quota, sleep=clock.sleep, limiter=RateLimiter(100, clock=clock))
+    limiter = RateLimiter(100, clock=clock)
+    return ResilientLLM(inner, rpm=100, quota=quota, sleep=clock.sleep, limiter=limiter, jitter=lambda d: d)
 
 
 def test_transient_error_is_retried_with_backoff() -> None:
@@ -122,6 +162,19 @@ def test_transient_error_is_retried_with_backoff() -> None:
     reply = _resilient(inner, clock).decide(MESSAGES)
     assert reply.decision == DECISION and inner.calls == 3
     assert clock.sleeps == [2.0, 4.0]
+
+
+def test_backoff_goes_through_the_jitter() -> None:
+    clock = FakeClock()
+    inner = ScriptedLLM("m", [TransientLLMError("503"), TransientLLMError("503")])
+    limiter = RateLimiter(100, clock=clock)
+    ResilientLLM(inner, rpm=100, sleep=clock.sleep, limiter=limiter, jitter=lambda d: d / 2).decide(MESSAGES)
+    assert clock.sleeps == [1.0, 2.0]
+
+
+def test_equal_jitter_stays_between_half_and_full_delay() -> None:
+    samples = [equal_jitter(4.0) for _ in range(500)]
+    assert all(2.0 <= s <= 4.0 for s in samples) and len(set(samples)) > 1
 
 
 def test_per_minute_429_honours_retry_after() -> None:

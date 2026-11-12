@@ -12,7 +12,7 @@ Tudo em `src/llm.py` e `src/resilience.py`, sem dependência nova e sem tocar no
 
 - **Modelos em ordem de fallback** (`GEMINI_MODELS=gemini-3.5-flash-lite:15,gemini-3.1-flash-lite:15`), somando 1.000 chamadas por dia.
 - **Limitador de RPM por modelo** antes de cada chamada.
-- **Retry com backoff** em 5xx, timeout e 429 por minuto (respeitando o `retryDelay` da API); resposta vazia ou fora do schema também é tratada.
+- **Retry com backoff e jitter** (atraso sorteado entre metade e o valor cheio) em 5xx, timeout, resposta vazia ou fora do schema e 429 por minuto. No 429, o `retryDelay` da API é respeitado sem jitter. Esgotadas as tentativas, o fallback assume.
 - **Marca persistida de "cota diária esgotada"** até a meia-noite do Pacífico: o modelo esgotado é pulado direto (faz o papel de circuit breaker para 429).
 - **Cache em disco** por hash de modelo + mensagens + schema da saída (`LLM_CACHE=on`), e modo `replay` que só lê o cache e nunca chama a API.
 

@@ -127,7 +127,8 @@ class GeminiLLM:
             raise LLMError(f"{self._model}: resposta inesperada do provedor")
         parsed = out.get("parsed")
         if out.get("parsing_error") is not None or not isinstance(parsed, BaseModel):
-            raise LLMError(f"{self._model}: resposta vazia ou fora do schema: {out.get('parsing_error')}")
+            # Gemini sometimes returns an empty candidate; the same prompt usually works on the next try.
+            raise TransientLLMError(f"{self._model}: resposta vazia ou fora do schema: {out.get('parsing_error')}")
         return LLMReply(
             decision=AgentDecision.model_validate(parsed.model_dump()),
             usage=_usage_from(out.get("raw")),

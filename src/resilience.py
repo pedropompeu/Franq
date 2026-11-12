@@ -5,8 +5,9 @@ Composition built by ``get_llm()`` (outermost first)::
     FallbackLLM([CachedLLM(ResilientLLM(GeminiLLM(model_a))), CachedLLM(ResilientLLM(GeminiLLM(model_b)))])
 
 - ``CachedLLM``: identical prompt → stored decision, zero API calls (temperature 0 makes replay valid).
-- ``ResilientLLM``: client-side RPM limiter, backoff on transient errors and per-minute 429s,
-  and a persisted "daily quota exhausted" mark so later runs skip the model until reset.
+- ``ResilientLLM``: client-side RPM limiter, backoff with jitter on transient errors (including
+  empty responses) and per-minute 429s, and a persisted "daily quota exhausted" mark so later
+  runs skip the model until reset.
 - ``FallbackLLM``: Gemini quotas are per model, so the next model gets a fresh budget.
 """
 
@@ -15,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import threading
 import time
 from collections import deque
@@ -36,6 +38,11 @@ PACIFIC = ZoneInfo("America/Los_Angeles")  # Gemini daily quotas reset at midnig
 
 class CacheMiss(LLMError):
     """Replay mode found no stored answer for this prompt."""
+
+
+def equal_jitter(delay: float) -> float:
+    """Random delay in ``[delay / 2, delay]``: spreads retries out while keeping a minimum wait."""
+    return delay / 2 + random.uniform(0, delay / 2)  # noqa: S311 - timing, not cryptography
 
 
 def next_quota_reset(now: float) -> float:
@@ -113,8 +120,10 @@ class ResilientLLM:
         max_delay_s: float = 60.0,
         sleep: Callable[[float], None] = time.sleep,
         limiter: RateLimiter | None = None,
+        jitter: Callable[[float], float] = equal_jitter,
     ) -> None:
         self.inner = inner
+        self._jitter = jitter
         self.quota = quota
         self.max_attempts = max_attempts
         self.base_delay_s, self.max_delay_s = base_delay_s, max_delay_s
@@ -139,12 +148,16 @@ class ResilientLLM:
                     if self.quota is not None:
                         self.quota.mark_exhausted(model)
                     raise
-                last, delay = err, err.retry_after or self.base_delay_s * 2 ** (attempt - 1)
+                # the server's retryDelay is honoured as given; only computed backoff gets jitter
+                last, delay = err, err.retry_after or self._backoff(attempt)
             except TransientLLMError as err:
-                last, delay = err, self.base_delay_s * 2 ** (attempt - 1)
+                last, delay = err, self._backoff(attempt)
             if attempt < self.max_attempts:
                 self._sleep(min(delay, self.max_delay_s))
         raise last or LLMError(f"{model}: nenhuma tentativa realizada")
+
+    def _backoff(self, attempt: int) -> float:
+        return self._jitter(self.base_delay_s * 2 ** (attempt - 1))
 
 
 class FallbackLLM:

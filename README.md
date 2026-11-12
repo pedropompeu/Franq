@@ -34,7 +34,7 @@ Pela linha de comando:
 Verificações e avaliação:
 
 ```bash
-make check                  # ruff + formatação + mypy estrito + 174 testes (não usa a API)
+make check                  # ruff + formatação + mypy estrito + 177 testes (não usa a API)
 make eval ARGS="--repeat 3" # avaliação com o Gemini real (gasta cota gratuita)
 ```
 
@@ -88,7 +88,7 @@ Limite conhecido: a pseudonimização cobre os valores que estão no banco. Um n
 O free tier do Gemini tem limite de requisições por minuto e por dia, por modelo ([ADR 0005](docs/adr/0005-resiliencia-na-cota-gratuita.md)):
 
 - **Limitador local** de requisições por minuto, por modelo, antes de chamar a API.
-- **Retry com backoff** em erros transitórios.
+- **Retry com backoff e jitter** em erros transitórios, incluindo resposta vazia do Gemini. O `retryDelay` informado pela API é respeitado.
 - **Fallback real** para um segundo modelo Flash quando o primeiro esgota a cota (`GEMINI_MODELS`).
 - **Registro de cota** em disco: um modelo esgotado não é chamado de novo até a cota zerar (meia-noite do Pacífico).
 - **Cache** das respostas do LLM por hash da mensagem completa (`LLM_CACHE=on|off|replay`). Em `replay` o app só usa respostas já guardadas no cache local e nunca chama a API, nem precisa da chave.
