@@ -1,0 +1,4 @@
+# Runtime (Dia 1). LangGraph, Gemini e Streamlit entram no Dia 2–3.
+pydantic==2.14.3
+PyYAML==6.0.3
+sqlglot==30.31.0

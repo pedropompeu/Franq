@@ -1,0 +1,97 @@
+# Camada semântica do Assistente de Dados.
+#
+# O que fica AQUI: significado de negócio, regras e premissas, que não estão no banco.
+# O que NÃO fica aqui: estrutura do banco, valores categóricos e intervalos de datas.
+# Esses são descobertos em tempo de execução (src/db/tools.py::discover_schema).
+# As regras são expressões, não queries prontas: quem escreve a consulta é o agente.
+#
+# Toda coluna citada aqui é validada contra o schema real na inicialização
+# (src/semantic/dictionary.py::validate_against_schema).
+
+version: 1
+
+reference_date:
+  rule: >-
+    Datas relativas ("último ano", "últimos 3 meses", "este mês") usam como referência a data
+    mais recente registrada no banco, nunca a data de hoje do sistema. Mês citado sem ano
+    ("em maio") refere-se à ocorrência mais recente desse mês dentro dos dados.
+  coverage_note: >-
+    Os dados cobrem cerca de 12 meses. Um ano civil pode estar incompleto: declarar a cobertura
+    real (primeira e última data) sempre que a pergunta citar um ano.
+
+tables:
+  clientes:
+    description: Cadastro de clientes (um registro por cliente).
+    columns:
+      valor_total_gasto:
+        reliable: false
+        note: >-
+          Coluna desnormalizada que não bate com a tabela compras. Nunca usar. Para total gasto,
+          usar SUM(compras.valor) agrupado por cliente.
+      data_ultima_compra:
+        reliable: false
+        note: >-
+          Coluna desnormalizada que não bate com a tabela compras. Nunca usar. Para última
+          compra, usar MAX(compras.data_compra) agrupado por cliente.
+      nome:
+        pii: true
+      email:
+        pii: true
+      estado:
+        note: Nome do estado por extenso (não é a sigla UF).
+  compras:
+    description: Uma linha por compra realizada. Fonte de verdade para valores e datas de compra.
+    columns:
+      canal:
+        note: Canal de venda em que a compra foi feita ("via app" = canal App).
+  suporte:
+    description: Uma linha por contato de suporte.
+    columns:
+      tipo_contato:
+        note: '"Reclamação" é um dos tipos de contato.'
+      resolvido:
+        note: 1 = resolvido, 0 = não resolvido.
+  campanhas_marketing:
+    description: Uma linha por envio de campanha a um cliente.
+    columns:
+      interagiu:
+        note: 1 = o cliente interagiu com o envio, 0 = não interagiu.
+
+metrics:
+  - name: reclamacoes_nao_resolvidas
+    description: Reclamações ainda não resolvidas.
+    rule: "suporte.tipo_contato = 'Reclamação' AND suporte.resolvido = 0"
+    columns: [suporte.tipo_contato, suporte.resolvido]
+
+  - name: clientes_que_interagiram
+    description: Clientes distintos que interagiram com ao menos um envio de campanha.
+    rule: "COUNT(DISTINCT campanhas_marketing.cliente_id) com campanhas_marketing.interagiu = 1"
+    columns: [campanhas_marketing.cliente_id, campanhas_marketing.interagiu]
+
+  - name: clientes_que_compraram
+    description: Clientes distintos com ao menos uma compra no recorte.
+    rule: "COUNT(DISTINCT compras.cliente_id)"
+    columns: [compras.cliente_id]
+
+  - name: total_gasto_por_cliente
+    description: Soma do valor das compras de cada cliente.
+    rule: "SUM(compras.valor) GROUP BY compras.cliente_id"
+    columns: [compras.valor, compras.cliente_id]
+
+  - name: media_compras_por_cliente
+    description: Número médio de compras por cliente.
+    rule: "COUNT(compras.id) / COUNT(DISTINCT compras.cliente_id) no mesmo recorte"
+    columns: [compras.id, compras.cliente_id]
+    ambiguity: >-
+      O denominador pode ser (a) os clientes que compraram no recorte (padrão adotado) ou
+      (b) todos os clientes cadastrados. Sempre declarar qual foi usado na resposta.
+
+conventions:
+  - Contagem de clientes é sempre COUNT(DISTINCT cliente_id), nunca COUNT(*).
+  - Datas são TEXT no formato YYYY-MM-DD. Usar strftime('%Y-%m', coluna), strftime('%Y', coluna) ou date().
+  - Booleanos são inteiros 0/1.
+  - Comparar valores categóricos com a grafia exata descoberta no schema (acentos e maiúsculas).
+  - Ordenação determinística. Em rankings, desempatar pela coluna de rótulo (ex. ORDER BY n DESC, estado).
+  - Tendência temporal = série agregada por mês (strftime('%Y-%m', ...)), em ordem cronológica.
+  - Meses nas bordas da janela de dados podem estar incompletos. Declarar isso ao mostrar tendências.
+  - Para divisões, multiplicar por 1.0 para evitar divisão inteira.
