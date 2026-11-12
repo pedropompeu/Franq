@@ -9,6 +9,21 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def load_env_file(path: Path | None = None) -> None:
+    """Minimal ``.env`` loader (KEY=VALUE lines). Real environment variables always win."""
+    env_path = path or PROJECT_ROOT / ".env"
+    if not env_path.is_file():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip().removeprefix("export ").strip(), value.strip().strip("'\"")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+
+
 def _int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     return int(raw) if raw else default
@@ -27,6 +42,7 @@ class Settings:
     max_rows_for_llm: int  # rows shown to the model when it reads a result
     sql_timeout_s: float
     max_categorical_values: int  # TEXT columns with at most N distinct values are categorical
+    trace_path: Path  # JSONL trace file (no result rows, no PII)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -39,4 +55,5 @@ class Settings:
             max_rows_for_llm=_int_env("SQL_MAX_ROWS_LLM", 50),
             sql_timeout_s=_float_env("SQL_TIMEOUT_S", 5.0),
             max_categorical_values=_int_env("SCHEMA_MAX_CATEGORICAL", 30),
+            trace_path=Path(os.getenv("TRACE_PATH", PROJECT_ROOT / "traces" / "traces.jsonl")),
         )

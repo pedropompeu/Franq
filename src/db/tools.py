@@ -233,13 +233,17 @@ class SchemaInfo(BaseModel):
         info = self.table(table)
         return info is not None and any(c.name == column for c in info.columns)
 
-    def to_prompt(self) -> str:
-        """Compact, model-friendly description. Contains no sample rows."""
+    def to_prompt(self, unreliable: frozenset[str] = frozenset()) -> str:
+        """Compact, model-friendly description. Contains no sample rows.
+
+        ``unreliable`` (``table.column``) are flagged inline so the model never picks them.
+        """
         lines: list[str] = []
         for table in self.tables:
             lines.append(f"Tabela {table.name} ({table.row_count} linhas)")
             for col in table.columns:
-                lines.append(f"  - {col.name} {col.declared_type or '?'}: {_describe(col)}")
+                flag = " [NÃO CONFIÁVEL, NÃO USAR]" if f"{table.name}.{col.name}" in unreliable else ""
+                lines.append(f"  - {col.name} {col.declared_type or '?'}: {_describe(col)}{flag}")
         if self.reference_date:
             lines.append(f"Data mais recente no banco (data de referência): {self.reference_date}")
         return "\n".join(lines)

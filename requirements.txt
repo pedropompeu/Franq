@@ -1,4 +1,8 @@
-# Runtime (Dia 1). LangGraph, Gemini e Streamlit entram no Dia 2–3.
+# Runtime. Streamlit entra no Dia 3.
 pydantic==2.14.3
 PyYAML==6.0.3
 sqlglot==30.31.0
+langgraph==1.2.21
+langchain-core==1.8.0
+langchain-google-genai==4.5.0
+google-genai==3.3.0
