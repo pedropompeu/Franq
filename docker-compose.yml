@@ -1,4 +1,4 @@
-# docker compose up → http://localhost:8501
+# docker compose up → app em http://localhost:8501 e API em http://localhost:8000 (/docs)
 # Única configuração obrigatória: GOOGLE_API_KEY no arquivo .env (copie de .env.example).
 services:
   app:
@@ -6,6 +6,26 @@ services:
     image: assistente-dados
     ports:
       - "8501:8501"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - llm-cache:/app/.cache
+      - traces:/app/traces
+    restart: unless-stopped
+
+  api:
+    image: assistente-dados
+    depends_on:
+      - app  # same image, built once by the app service
+    command: ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "${API_PORT:-8000}:8000"  # API_PORT=8010 docker compose up, se a 8000 estiver ocupada
+    healthcheck:  # the image's own check targets the Streamlit port
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
     env_file:
       - path: .env
         required: false

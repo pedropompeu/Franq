@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: install lint typecheck test check run eval
+.PHONY: install lint typecheck test check run run-api eval
 
 install:
 	python3 -m venv .venv
@@ -20,6 +20,10 @@ check: lint typecheck test
 
 run:
 	$(PY) -m streamlit run app.py
+
+# API HTTP em http://localhost:8000 (documentação interativa em /docs)
+run-api:
+	$(PY) -m uvicorn src.api:app --reload
 
 # Avaliação com o Gemini real (gasta cota): make eval ARGS="--repeat 3"
 eval:
