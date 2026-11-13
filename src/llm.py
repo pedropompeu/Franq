@@ -200,7 +200,8 @@ def get_llm() -> StructuredLLM:
     elif cache_mode != "replay" and not api_key:
         raise LLMError("GOOGLE_API_KEY não definida. Copie .env.example para .env e preencha a chave.")
 
-    quota = QuotaStore(cache_dir / "quota.json")
+    # one quota file per provider: an exhausted AI Studio free tier says nothing about a billed Vertex project
+    quota = QuotaStore(cache_dir / ("quota.json" if provider == "gemini" else f"quota-{provider}.json"))
     chain: list[StructuredLLM] = []
     for model, rpm in specs:
         if cache_mode == "replay":

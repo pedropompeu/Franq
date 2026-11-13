@@ -81,3 +81,16 @@ def test_unknown_provider_still_rejected(vertex_env: pytest.MonkeyPatch) -> None
     vertex_env.setenv("LLM_PROVIDER", "openai")
     with pytest.raises(LLMError, match="LLM_PROVIDER desconhecido"):
         get_llm()
+
+
+def test_vertex_ignores_ai_studio_quota_mark(
+    vertex_env: pytest.MonkeyPatch, fake_chat: list[dict[str, Any]], tmp_path: Path
+) -> None:
+    from src.resilience import QuotaStore, ResilientLLM
+
+    QuotaStore(tmp_path / "quota.json").mark_exhausted("gemini-x")  # AI Studio free tier ran out
+    vertex_env.setenv("GOOGLE_CLOUD_PROJECT", "meu-projeto")
+    llm = get_llm()
+    assert isinstance(llm, ResilientLLM)
+    assert llm.quota is not None
+    assert llm.quota.exhausted_until("gemini-x") is None  # billed project: its own quota
