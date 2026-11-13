@@ -22,7 +22,7 @@ from src.db.tools import QueryResult, SchemaInfo
 from src.semantic.dictionary import SemanticDictionary
 from src.ui import texts
 
-# Light theme "Grafite e laranja" (BRAND.md). Categorical order validated on #E6E9EE and #FFFFFF
+# Light theme "Grafite e lavanda" (BRAND.md v1.1). Categorical order validated on #E6E9EE and #FFFFFF
 # (lightness band, chroma floor, CVD and normal-vision separation). Slots 2-5 sit below 3:1 on the
 # page, so the legend and the table view are mandatory, never optional.
 CATEGORICAL = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948")

@@ -22,7 +22,7 @@ from pathlib import Path
 from src.db.tools import open_readonly
 from src.ui.view import CATEGORICAL
 
-# Grafite e laranja (BRAND.md). vis-network ignores the Streamlit theme, so colors are set here.
+# Grafite e lavanda (BRAND.md v1.1). vis-network ignores the Streamlit theme, so colors are set here.
 SURFACE, INK, INK_MUTED, EDGE = "#FFFFFF", "#0E1520", "#465061", "#AEB5C0"
 HEIGHT_PX = 620
 VIS_OPTIONS = {

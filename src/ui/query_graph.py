@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 import sqlglot
 from sqlglot import exp
 
-# Grafite e laranja (BRAND.md). Graphviz ignores the Streamlit theme, so colors are set here.
+# Grafite e lavanda (BRAND.md v1.1). Graphviz ignores the Streamlit theme, so colors are set here.
 CLUSTER_FILL, CLUSTER_LINE = "#F3F4F6", "#AEB5C0"
 NODE_FILL, NODE_LINE, INK, INK_MUTED = "#FFFFFF", "#646C79", "#0E1520", "#465061"
 FILTER_LINE, FILTER_TAG = "#C2410C", "#B23A0A"
