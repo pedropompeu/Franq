@@ -310,8 +310,10 @@ def main() -> None:
     st.html(style.CSS_PATH)
     st.session_state.setdefault("history", [])
     render_sidebar(rt)
-    st.title(texts.APP_TITLE, anchor=False)
-    st.caption(texts.SUBTITLE)
+    with st.container(key=style.MASTHEAD):
+        st.html(style.banner_html())
+    with st.container(key=style.HEADLINE):
+        st.title(f"{texts.APP_TITLE} :small[· {texts.SUBTITLE}]", anchor=False)
     if st.session_state.pop("show_ask_tab", False):
         st.session_state["main_tab"] = texts.TAB_ASK
     tab_ask, tab_graph, tab_traces = st.tabs(

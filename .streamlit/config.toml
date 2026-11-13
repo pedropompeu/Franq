@@ -1,6 +1,7 @@
-# Tema claro "Grafite e laranja" sobre "Cinza frio" (BRAND.md). Contrastes medidos sobre #E6E9EE:
-# texto 15,1:1 · texto secundário 6,7:1 · controle 4,35:1 · laranja #C2410C 4,25:1 (texto branco nele 5,2:1).
-# Laranja só em ação (botão primário, foco, link); dados nunca usam a cor de ação.
+# Tema claro "Grafite e lavanda" sobre "Cinza frio" (BRAND.md v1.1, clima do banner). Contrastes sobre #E6E9EE:
+# texto 15,1:1 · texto secundário 6,7:1 · controle 4,35:1 · lavanda #4F63D6 4,22:1 (texto branco nela 5,1:1)
+# · link #3F51C4 5,4:1. Lavanda só em ação (botão primário, foco, seleção, link); dados nunca usam a cor de ação.
+# O laranja fica só como status ("Premissa", autocorreção) e no contorno de filtro do grafo da consulta.
 # Cores de status (texto sobre fundo próprio) todas acima de 4,5:1, também sobre o fundo da página.
 # Paleta categórica = paleta de referência da skill dataviz, validada sobre #E6E9EE
 # (daltonismo pior par 9,1; visão normal 19,6). Contraste baixo de algumas cores → legenda e tabela sempre.
@@ -17,11 +18,11 @@ showErrorDetails = "none"
 
 [theme]
 base = "light"
-primaryColor = "#C2410C"
+primaryColor = "#4F63D6"
 backgroundColor = "#E6E9EE"
 secondaryBackgroundColor = "#FFFFFF"
 textColor = "#0E1520"
-linkColor = "#B23A0A"
+linkColor = "#3F51C4"
 borderColor = "#646C79"
 showWidgetBorder = true
 baseRadius = "4px"
