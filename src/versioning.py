@@ -1,24 +1,33 @@
 """Prompt version: a short hash of everything that shapes what the LLM is asked.
 
-The system prompt, the business dictionary and the decision schema all change the model's
-behavior; any edit to one of them yields a new version, recorded in every trace and response,
-so an answer can be tied to the exact prompt that produced it.
+The source files that build the messages (system prompt, conversation note, history window,
+message template, the privacy note on masked tokens), the business dictionary and the decision
+schema all change the model's behavior; any edit to one of them yields a new version, recorded
+in every trace and response, so an answer can be tied to the exact prompt that produced it.
+
+Hashing whole source files is deliberately coarse: a comment edit also bumps the version, which
+costs a re-run of the evaluation, never a silently mislabeled one.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
+from src import privacy
+from src.agent import prompts
 from src.agent.models import AgentDecision
-from src.agent.prompts import SYSTEM_PROMPT
+
+PROMPT_SOURCES: tuple[Path, ...] = (Path(prompts.__file__), Path(privacy.__file__))
 
 
-def prompt_version(dictionary_path: Path) -> str:
-    """First 8 hex chars of sha256(system prompt + dictionary bytes + decision JSON schema)."""
+def prompt_version(dictionary_path: Path, sources: Sequence[Path] = PROMPT_SOURCES) -> str:
+    """First 8 hex chars of sha256(prompt source files + dictionary bytes + decision JSON schema)."""
     digest = hashlib.sha256()
-    digest.update(SYSTEM_PROMPT.encode("utf-8"))
+    for source in sources:
+        digest.update(source.read_bytes())
     digest.update(dictionary_path.read_bytes())
     digest.update(json.dumps(AgentDecision.model_json_schema(), sort_keys=True).encode("utf-8"))
     return digest.hexdigest()[:8]

@@ -15,7 +15,7 @@ from src.config import Settings
 from src.llm import LLMReply
 from src.observability import Tracer
 from src.run_context import RunInfo, current_run, run_scope
-from src.versioning import prompt_version
+from src.versioning import PROMPT_SOURCES, prompt_version
 from tests.unit.test_agent import P2_SQL, FakeLLM, answer, query
 
 
@@ -34,6 +34,15 @@ def test_prompt_version_changes_with_dictionary(settings: Settings, tmp_path: Pa
     copy = tmp_path / "dictionary.yaml"
     copy.write_text(settings.dictionary_path.read_text(encoding="utf-8") + "\n# outra linha\n", encoding="utf-8")
     assert prompt_version(copy) != prompt_version(settings.dictionary_path)
+
+
+@pytest.mark.parametrize("source", PROMPT_SOURCES, ids=lambda path: path.name)
+def test_prompt_version_changes_with_prompt_sources(settings: Settings, tmp_path: Path, source: Path) -> None:
+    """CONVERSATION_NOTE, HISTORY_TURNS, PROMPT_NOTE, the message template: all live in these files."""
+    copy = tmp_path / source.name
+    copy.write_bytes(source.read_bytes() + b"\n# CONVERSATION_NOTE editada\n")
+    sources = [copy if path == source else path for path in PROMPT_SOURCES]
+    assert prompt_version(settings.dictionary_path, sources) != prompt_version(settings.dictionary_path)
 
 
 def test_run_scope_is_visible_inside_and_cleared_after() -> None:
