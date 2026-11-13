@@ -73,11 +73,22 @@ class TokenUsage(BaseModel):
         )
 
 
+NoticeKind = Literal["tie_at_cut", "partial_period"]
+
+
+class Notice(BaseModel):
+    """A warning computed in code from the SQL and the data, never by the LLM."""
+
+    kind: NoticeKind
+    text: str
+
+
 class AgentResponse(BaseModel):
     question: str
     status: Literal["answered", "refused", "failed"]
     answer: str
     assumptions: list[str] = Field(default_factory=list)
+    notices: list[Notice] = Field(default_factory=list)
     chart: ChartSpec = Field(default_factory=lambda: ChartSpec(type="table"))
     data: QueryResult | None = None
     steps: list[Step] = Field(default_factory=list)

@@ -28,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[{response.status}] {response.answer}")
     for assumption in response.assumptions:
         print(f"  premissa: {assumption}")
+    for notice in response.notices:
+        print(f"  aviso: {notice.text}")
     for step in response.steps:
         print(f"\n--- passo {step.index} · {step.kind} · {step.thought}")
         if step.sql:

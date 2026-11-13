@@ -16,9 +16,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from src.agent.models import AgentDecision, AgentResponse, ChartSpec, Step, TokenUsage
+from src.agent.notices import compute_notices
 from src.agent.prompts import build_context, build_messages
 from src.config import Settings
-from src.db.tools import QueryError, QueryResult, discover_schema, run_sql
+from src.db.tools import QueryError, QueryResult, SchemaInfo, discover_schema, run_sql
 from src.llm import LLMError, StructuredLLM
 from src.observability import Tracer
 from src.privacy import Pseudonymizer, load_pseudonymizer
@@ -104,6 +105,7 @@ class Assistant:
         # Personal data never leaves for the LLM: see src/privacy.py.
         self.privacy = privacy or load_pseudonymizer(settings.db_path, self.dictionary.pii_columns())
         self.schema_warnings: list[str] = []
+        self.schema: SchemaInfo | None = None
         self._graph = self._build()
 
     # ------------------------------------------------------------------ nodes
@@ -116,6 +118,7 @@ class Assistant:
             max_categorical=self.settings.max_categorical_values,
             exclude_from_reference=unreliable,
         )
+        self.schema = schema
         self.schema_warnings = validate_against_schema(self.dictionary, schema)
         context = build_context(schema.to_prompt(unreliable), self.dictionary.to_prompt())
         return {"context": self.privacy.mask(context)}
@@ -302,8 +305,13 @@ class Assistant:
         with listening(on_progress):
             final = self._graph.invoke(initial, {"recursion_limit": 4 * self.limits.max_steps + 10})
         response: AgentResponse = final["response"]
+        if response.status == "answered" and response.data is not None and self.schema is not None:
+            notices = compute_notices(response.data.sql, response.data, self.schema, self.settings)
+        else:
+            notices = []
         response = response.model_copy(
             update={
+                "notices": notices,
                 "latency_ms": round((time.monotonic() - started) * 1000, 1),
                 "model": final["model"] or self.llm.model_name,
                 "cache_hits": final["cache_hits"],

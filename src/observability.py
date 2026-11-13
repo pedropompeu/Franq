@@ -29,6 +29,7 @@ def trace_record(response: AgentResponse) -> dict[str, Any]:
         "corrections": response.corrections,
         "usage": response.usage.model_dump(),
         "chart": response.chart.model_dump(),
+        "notices": [n.kind for n in response.notices],  # kinds only: texts may carry row values
         "result_rows": response.data.row_count if response.data else None,
         "steps": [
             s.model_dump(include={"index", "kind", "sql", "row_count", "columns", "error", "elapsed_ms"})

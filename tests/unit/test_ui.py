@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from src.agent.models import AgentResponse, ChartSpec
+from src.agent.models import AgentResponse, ChartSpec, Notice
 from src.config import Price, Settings
 from src.db.tools import QueryResult, discover_schema
 from src.semantic.dictionary import SemanticDictionary, load_dictionary
@@ -106,6 +106,15 @@ def test_quality_notes(dictionary: SemanticDictionary) -> None:
     assert any("limitado a 1 linhas" in n for n in notes)
     assert any("dados pessoais (email, nome)" in n for n in notes)
     assert any("corrigiu sozinho (correções: 1)" in n for n in notes)
+
+
+def test_quality_notes_lists_notices_first(dictionary: SemanticDictionary) -> None:
+    response = _response(STATES, corrections=1).model_copy(
+        update={"notices": [Notice(kind="tie_at_cut", text="Empate no corte do top 3.")]}
+    )
+    notes = view.quality_notes(response, dictionary)
+    assert notes[0] == "Empate no corte do top 3."
+    assert len(notes) == 2
 
 
 def test_quality_note_flags_unreliable_column(dictionary: SemanticDictionary) -> None:

@@ -95,4 +95,5 @@ conventions:
   - Ordenação determinística. Em rankings, desempatar pela coluna de rótulo (ex. ORDER BY n DESC, estado).
   - Tendência temporal = série agregada por mês (strftime('%Y-%m', ...)), em ordem cronológica.
   - Meses nas bordas da janela de dados podem estar incompletos. Declarar isso ao mostrar tendências.
+  - Nunca afirmar que um período está completo. A cobertura real de cada período é informada ao usuário pelo sistema.
   - Para divisões, multiplicar por 1.0 para evitar divisão inteira.

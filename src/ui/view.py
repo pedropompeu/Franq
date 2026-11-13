@@ -19,6 +19,7 @@ from typing import Any, cast
 import altair as alt
 
 from src.agent.models import AgentResponse, ChartSpec
+from src.agent.notices import br_date as br_date  # re-exported for app.py
 from src.config import Price
 from src.db.tools import QueryResult, SchemaInfo
 from src.semantic.dictionary import SemanticDictionary
@@ -261,7 +262,7 @@ def _columns_named(names: Iterable[str], candidates: Sequence[str]) -> list[str]
 
 def quality_notes(response: AgentResponse, dictionary: SemanticDictionary) -> list[str]:
     """Warnings shown next to the answer. Derived from the dictionary, never hardcoded."""
-    notes: list[str] = []
+    notes: list[str] = [n.text for n in response.notices]
     data = response.data
     if data is not None and data.truncated:
         notes.append(texts.QUALITY_TRUNCATED.format(rows=data.row_count))
@@ -314,12 +315,6 @@ def coverage(schema: SchemaInfo, unreliable: frozenset[str]) -> tuple[str, str] 
                 starts.append(str(column.min_value)[:10])
                 ends.append(str(column.max_value)[:10])
     return (min(starts), max(ends)) if starts else None
-
-
-def br_date(iso: str) -> str:
-    """``2025-11-30`` → ``30/11/2025``; anything else is returned unchanged."""
-    match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", iso[:10])
-    return f"{match[3]}/{match[2]}/{match[1]}" if match else iso
 
 
 # --- B: trace metrics panel
