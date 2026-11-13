@@ -406,16 +406,34 @@ def _rate(passed: int, runs: int) -> float:
     return round(passed / runs, 3) if runs else 0.0
 
 
-def write_baseline(report: EvalReport, path: Path) -> None:
-    """Store per-question pass counts, to compare later runs with (``compare_baseline``)."""
+def _model_counts(report: EvalReport) -> dict[str, tuple[int, int]]:
+    """Per question, (passed, runs) over the runs that reached the model.
+
+    A run lost to quota or network (the ``llm`` check) says nothing about the prompt or the
+    model, so it neither counts as a regression nor lowers a stored baseline.
+    """
+    counts: dict[str, tuple[int, int]] = {}
+    for case_id, runs in report.by_case.items():
+        answered = [r for r in runs if r.checks.get("llm", True)]
+        if answered:
+            counts[case_id] = (sum(r.passed for r in answered), len(answered))
+    return counts
+
+
+def write_baseline(report: EvalReport, path: Path, *, merge: bool = False) -> None:
+    """Store per-question pass counts, to compare later runs with (``compare_baseline``).
+
+    With ``merge`` (a partial run, ``--only``) the questions not run keep their stored counts.
+    """
+    cases: dict[str, Any] = {}
+    if merge and path.exists():
+        cases = dict(json.loads(path.read_text(encoding="utf-8")).get("cases", {}))
+    cases |= {case_id: {"passed": passed, "runs": runs} for case_id, (passed, runs) in _model_counts(report).items()}
     data = {
         "prompt_version": report.prompt_version,
         "models": report.models,
         "started": report.started.isoformat(timespec="seconds"),
-        "cases": {
-            case_id: {"passed": sum(r.passed for r in runs), "runs": len(runs)}
-            for case_id, runs in report.by_case.items()
-        },
+        "cases": cases,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -425,11 +443,11 @@ def compare_baseline(report: EvalReport, baseline: dict[str, Any]) -> list[Regre
     """Questions present in both whose pass rate dropped."""
     stored = baseline.get("cases", {})
     regressions = []
-    for case_id, runs in report.by_case.items():
+    for case_id, (passed, runs) in _model_counts(report).items():
         if case_id not in stored:
             continue
         before = _rate(int(stored[case_id]["passed"]), int(stored[case_id]["runs"]))
-        after = _rate(sum(r.passed for r in runs), len(runs))
+        after = _rate(passed, runs)
         if after < before:
             regressions.append(Regression(case_id, before, after))
     return regressions
@@ -593,7 +611,11 @@ def main(argv: list[str] | None = None) -> int:
         help="rodada anterior para comparar (padrão: docs/avaliacao.json)",
     )
     parser.add_argument("--no-baseline", action="store_true", help="não comparar com a rodada anterior")
-    parser.add_argument("--save-baseline", action="store_true", help="gravar esta rodada como a nova base")
+    parser.add_argument(
+        "--save-baseline",
+        action="store_true",
+        help="gravar esta rodada como a nova base (com --only, atualiza só essas perguntas)",
+    )
     parser.add_argument(
         "--langfuse", action="store_true", help="registrar a rodada como execução de dataset no LangFuse"
     )
@@ -642,13 +664,15 @@ def main(argv: list[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(render_report(report, regressions, baseline), encoding="utf-8")
     print(f"\nRelatório: {args.output}")
-    if args.save_baseline:
-        write_baseline(report, args.baseline)
-        print(f"Base gravada: {args.baseline}")
     leaks = sum(r.leaks for r in report.runs)
     if leaks or not report.db_unchanged:
         print("FALHA GRAVE: vazamento de dado pessoal ou banco alterado.", file=sys.stderr)
+        if args.save_baseline:
+            print("Base NÃO gravada: uma rodada com falha grave não serve de referência.", file=sys.stderr)
         return 1
+    if args.save_baseline:
+        write_baseline(report, args.baseline, merge=bool(args.only))
+        print(f"Base gravada: {args.baseline}")
     if regressions:
         print(f"REGRESSÃO em relação à rodada anterior: {', '.join(r.case_id for r in regressions)}.", file=sys.stderr)
         return 3

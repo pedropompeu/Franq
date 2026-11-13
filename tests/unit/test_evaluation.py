@@ -359,6 +359,56 @@ def test_main_saves_baseline_only_when_asked(tmp_path: Path, monkeypatch: pytest
     assert json.loads(baseline.read_text(encoding="utf-8"))["cases"] == {"E1": {"passed": 1, "runs": 1}}
 
 
+def _llm_failure(case_id: str) -> CaseRun:
+    """A run lost to quota or network: says nothing about the model or the prompt."""
+    return dataclasses.replace(_run(case_id, False), checks={"status": False, "llm": False})
+
+
+def test_llm_failures_are_not_regressions() -> None:
+    baseline = {"cases": {"E1": {"passed": 1, "runs": 1}, "E2": {"passed": 2, "runs": 2}}}
+    report = _report(("E2", True))
+    report = dataclasses.replace(report, runs=[_llm_failure("E1"), *report.runs, _llm_failure("E2")])
+    assert compare_baseline(report, baseline) == []
+
+
+def test_baseline_leaves_out_llm_failures(tmp_path: Path) -> None:
+    report = _report(("E1", True))
+    report = dataclasses.replace(report, runs=[*report.runs, _llm_failure("E1"), _llm_failure("E2")])
+    path = tmp_path / "avaliacao.json"
+    write_baseline(report, path)
+    assert json.loads(path.read_text(encoding="utf-8"))["cases"] == {"E1": {"passed": 1, "runs": 1}}
+
+
+def test_save_baseline_with_only_keeps_other_questions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = tmp_path / "avaliacao.json"
+    write_baseline(_report(("E1", True), ("E2", True)), baseline)
+    monkeypatch.setattr(evaluation, "get_llm", lambda: FakeLLM([]))
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda *_a, **_k: _report(("E1", True), ("E1", True)))
+    args = ["--only", "E1", "--baseline", str(baseline), "--output", str(tmp_path / "r.md"), "--save-baseline"]
+    assert evaluation.main(args) == 0
+    assert json.loads(baseline.read_text(encoding="utf-8"))["cases"] == {
+        "E1": {"passed": 2, "runs": 2},
+        "E2": {"passed": 1, "runs": 1},
+    }
+
+
+@pytest.mark.parametrize("broken", ["leak", "db"])
+def test_save_baseline_refused_after_serious_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: str
+) -> None:
+    report = _report(("E1", True))
+    if broken == "leak":
+        report = dataclasses.replace(report, runs=[dataclasses.replace(report.runs[0], leaks=1)])
+    else:
+        report = dataclasses.replace(report, db_unchanged=False)
+    baseline = tmp_path / "avaliacao.json"
+    monkeypatch.setattr(evaluation, "get_llm", lambda: FakeLLM([]))
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda *_a, **_k: report)
+    args = ["--baseline", str(baseline), "--output", str(tmp_path / "r.md"), "--save-baseline"]
+    assert evaluation.main(args) == 1
+    assert not baseline.exists()
+
+
 # ---------------------------------------------------------------- follow-up questions
 
 
