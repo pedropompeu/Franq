@@ -59,7 +59,7 @@ flowchart LR
 2. **Camada semântica.** [`src/semantic/dictionary.yaml`](src/semantic/dictionary.yaml) guarda só o significado de negócio: métricas como expressões, colunas não confiáveis, dados pessoais, convenções. É validado contra o schema real na inicialização ([ADR 0004](docs/adr/0004-camada-semantica-e-descoberta-dinamica.md)).
 3. **Decisão estruturada.** A cada passo o Gemini devolve um `AgentDecision` (Pydantic): consultar, responder ou recusar. A resposta final traz texto, tipo de visualização, eixos, premissas e as consultas usadas.
 4. **Autocorreção.** Se a SQL falha, o erro real do SQLite volta ao modelo. Limites: 6 passos e 3 correções por pergunta.
-5. **Interface.** Streamlit mostra métrica, tabela ou gráfico (com download em CSV) e um painel "Como cheguei a esta resposta" com cada consulta, o grafo das tabelas e colunas usadas, a SQL e o custo em chamadas e tokens.
+5. **Interface.** Enquanto a resposta é montada, um painel de status diz a etapa em curso (ler o esquema, escrever a consulta, conferir o resultado) e lista o que já foi feito, inclusive esperas pelo limite de cota do Gemini e a troca para o modelo de reserva. Depois, Streamlit mostra métrica, tabela ou gráfico (com download em CSV) e um painel "Como cheguei a esta resposta" com cada consulta, o grafo das tabelas e colunas usadas, a SQL e o custo em chamadas e tokens.
 
 ![Raciocínio: grafo da consulta, SQL e resposta](docs/img/raciocinio.png)
 
@@ -145,9 +145,10 @@ src/
   semantic/                dicionário de negócio e validação contra o schema
   llm.py, resilience.py    provedor, limitador, fallback, cache, registro de cota
   privacy.py               pseudonimização de nome e e-mail
+  progress.py              eventos de progresso da pergunta (etapas, esperas de cota)
   observability.py         rastros JSONL
   evaluation.py            avaliação por acerto de execução
-  ui/                      componentes, textos, tema, grafo da consulta
+  ui/                      componentes, textos, tema, grafo da consulta, painel de progresso
   ui/banner.png            faixa do topo (imagem do material do desafio)
   ui/data_graph.py         aba "Visão em grafo" (pyvis, só agregados)
   cli.py                   uso pela linha de comando

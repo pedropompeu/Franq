@@ -9,6 +9,7 @@ attributes, never generated class names. ``tests/unit/test_style.py`` enforces b
 from __future__ import annotations
 
 import base64
+import json
 from functools import cache
 from pathlib import Path
 from typing import Final
@@ -34,6 +35,26 @@ def bot_key(turn: int | str) -> str:
 
 def result_key(response_id: str) -> str:
     return f"result-{response_id}"
+
+
+def scroll_below_banner_js(key: str) -> str:
+    """Script that scrolls the page until the keyed container sits right under the sticky banner.
+
+    Streamlit has no scroll API. Used when a question is sent: after a suggestion click the welcome
+    fills the screen and the live progress would sit below the fold. Waits up to 2 s for the
+    element to mount. ``key`` comes from this module, never from user input.
+    """
+    selector = json.dumps(f".st-key-{key}")
+    banner = json.dumps(f".st-key-{MASTHEAD}")
+    return (
+        "<script>(() => { let tries = 0; const go = () => {"
+        f" const el = document.querySelector({selector});"
+        " const main = document.querySelector('[data-testid=\"stMain\"]');"
+        " if (!el || !main) { if (++tries < 40) setTimeout(go, 50); return; }"
+        f" const top = document.querySelector({banner})?.getBoundingClientRect().bottom ?? 0;"
+        " main.scrollTo({top: main.scrollTop + el.getBoundingClientRect().top - top - 16, behavior: 'smooth'});"
+        " }; go(); })()</script>"
+    )
 
 
 @cache

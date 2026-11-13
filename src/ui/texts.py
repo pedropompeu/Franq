@@ -20,7 +20,33 @@ WELCOME_COVERAGE: Final = (
     "conto a partir do fim desse período."
 )
 WELCOME_SUGGESTIONS: Final = "Sugestões de perguntas:"
-LOADING: Final = "Consultando o banco…"
+# Live progress while the answer is built (src/ui/progress_log.py). "doing" is the status label;
+# "done" goes to the list of finished stages when the next stage starts.
+PROGRESS_START: Final = "Preparando a resposta…"
+PROGRESS_HINT: Final = "Cada etapa consulta o modelo de linguagem e costuma levar alguns segundos."
+PROGRESS_DOING: Final = {
+    "context": "Lendo o esquema do banco…",
+    "planning": "Entendendo a pergunta e escrevendo a consulta…",
+    "reviewing": "Conferindo o resultado e montando a resposta…",
+    "fixing": "Corrigindo a consulta…",
+}
+PROGRESS_DONE: Final = {
+    "context": "Esquema e regras de negócio carregados",
+    "planning": "Pergunta analisada",
+    "reviewing": "Resultado conferido",
+    "fixing": "Consulta reescrita",
+}
+PROGRESS_QUERY_DONE: Final = "Consulta executada no banco: {rows} em {ms} ms"
+PROGRESS_QUERY_FAILED: Final = "O banco recusou a consulta; vou corrigir"
+PROGRESS_WAIT: Final = {
+    "rate_limit": "Limite de pedidos por minuto do Gemini: aguardando cerca de {seconds} s…",
+    "retry": "O Gemini não respondeu; nova tentativa em cerca de {seconds} s…",
+}
+PROGRESS_WAITED: Final = {
+    "rate_limit": "Aguardou o limite por minuto do Gemini (cerca de {seconds} s)",
+    "retry": "Nova tentativa após falha do Gemini (cerca de {seconds} s)",
+}
+PROGRESS_FALLBACK: Final = "Modelo principal indisponível; seguindo com {model}"
 
 # The five questions from the challenge statement, sent as written; the button shows the short form.
 SUGGESTED_QUESTIONS: Final = (

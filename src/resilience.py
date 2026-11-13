@@ -32,6 +32,7 @@ from langchain_core.messages import BaseMessage
 
 from src.agent.models import AgentDecision, TokenUsage
 from src.llm import LLMError, LLMReply, RateLimitError, StructuredLLM, TransientLLMError
+from src.progress import Progress, report
 
 PACIFIC = ZoneInfo("America/Los_Angeles")  # Gemini daily quotas reset at midnight Pacific time
 
@@ -74,7 +75,10 @@ class RateLimiter:
                 if len(self._sent) < self.rpm:
                     self._sent.append(now)
                     return
-                self._sleep(60.0 - (now - self._sent[0]) + 0.05)
+                wait = 60.0 - (now - self._sent[0]) + 0.05
+                report(Progress("waiting", seconds=wait, reason="rate_limit"))
+                self._sleep(wait)
+                report(Progress("resumed"))
 
 
 class QuotaStore:
@@ -153,7 +157,10 @@ class ResilientLLM:
             except TransientLLMError as err:
                 last, delay = err, self._backoff(attempt)
             if attempt < self.max_attempts:
-                self._sleep(min(delay, self.max_delay_s))
+                wait = min(delay, self.max_delay_s)
+                report(Progress("waiting", seconds=wait, reason="retry"))
+                self._sleep(wait)
+                report(Progress("resumed"))
         raise last or LLMError(f"{model}: nenhuma tentativa realizada")
 
     def _backoff(self, attempt: int) -> float:
@@ -174,7 +181,9 @@ class FallbackLLM:
 
     def decide(self, messages: Sequence[BaseMessage]) -> LLMReply:
         errors: list[str] = []
-        for llm in self.chain:
+        for position, llm in enumerate(self.chain):
+            if position > 0:
+                report(Progress("fallback", model=llm.model_name))
             try:
                 return llm.decide(messages)
             except LLMError as err:

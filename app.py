@@ -24,8 +24,10 @@ from src.config import Settings, load_env_file
 from src.db.tools import QueryResult, discover_schema
 from src.llm import LLMError, get_llm
 from src.observability import Tracer
+from src.progress import Progress
 from src.semantic.dictionary import load_dictionary
 from src.ui import data_graph, query_graph, style, texts, view
+from src.ui.progress_log import ProgressLog
 
 ASSISTANT_AVATAR = ":material/query_stats:"
 USER_BUBBLE_INDENT_PX = 96
@@ -212,12 +214,14 @@ def render_welcome(rt: Runtime, asked: set[str]) -> str | None:
     return pending
 
 
-def user_bubble(question: str, turn: int | str) -> None:
+def user_bubble(question: str, turn: int | str, *, scroll_here: bool = False) -> None:
     """The user's question as a right-aligned bubble (alignment from the API, paint from style.css).
 
     The fixed space on the left keeps long questions from spanning the full width, like a chat.
     """
     with st.container(horizontal=True, horizontal_alignment="right"):
+        if scroll_here:  # in this row it adds no vertical gap; static script, no user data
+            st.html(style.scroll_below_banner_js(style.user_key(turn)), unsafe_allow_javascript=True, width="content")
         st.space(USER_BUBBLE_INDENT_PX)
         with st.container(key=style.user_key(turn), width="content"):
             st.markdown(question)
@@ -226,13 +230,26 @@ def user_bubble(question: str, turn: int | str) -> None:
 def ask(rt: Runtime, question: str) -> None:
     if rt.assistant is None:  # the input is disabled in this case
         return
-    user_bubble(question, "pending")
+    user_bubble(question, "pending", scroll_here=True)
     with (
         st.container(key=style.bot_key("pending")),
         st.chat_message("assistant", avatar=ASSISTANT_AVATAR),
-        st.spinner(texts.LOADING),
+        st.status(texts.PROGRESS_START, expanded=True) as box,
     ):
-        response = rt.assistant.ask(question)
+        # Each Gemini call takes seconds: show the stage in progress and the ones already done.
+        st.caption(texts.PROGRESS_HINT)
+        checklist = st.empty()
+        log = ProgressLog()
+
+        def show(event: Progress) -> None:
+            log.apply(event)
+            box.update(label=log.label, expanded=True)  # without expanded, Streamlit 1.67 collapses it
+            checklist.markdown("  \n".join(f":material/check: {line}" for line in log.done))
+
+        response = rt.assistant.ask(question, on_progress=show)
+        # Collapse before the rerun: the answer's "how I got here" expander takes this element's place
+        # in the page and would otherwise inherit its open state.
+        box.update(state="complete", expanded=False)
     st.session_state.history.append(response)
     st.session_state.show_ask_tab = True  # applied before the tabs are created on the rerun
     st.rerun()

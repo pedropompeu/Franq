@@ -66,3 +66,14 @@ def test_banner_ships_with_the_app_and_has_alt_text() -> None:
     html = style.banner_html()
     assert html.startswith('<img src="data:image/png;base64,') and f'alt="{style.BANNER_ALT}"' in html
     assert "st.html(style.banner_html())" in APP
+
+
+def test_scroll_script_targets_the_keyed_container_under_the_banner() -> None:
+    script = style.scroll_below_banner_js(style.user_key("pending"))
+    assert script.startswith("<script>") and script.endswith("</script>")
+    assert '".st-key-user-pending"' in script and '".st-key-masthead"' in script
+    assert "scrollTo" in script and "tries < 40" in script  # bounded wait for the element to mount
+
+
+def test_app_scrolls_to_the_pending_question_only() -> None:
+    assert APP.count("scroll_here=True") == 1 and 'user_bubble(question, "pending", scroll_here=True)' in APP

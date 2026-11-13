@@ -22,6 +22,7 @@ from src.db.tools import QueryError, QueryResult, discover_schema, run_sql
 from src.llm import LLMError, StructuredLLM
 from src.observability import Tracer
 from src.privacy import Pseudonymizer, load_pseudonymizer
+from src.progress import Listener, Progress, ProgressKind, listening, report
 from src.semantic.dictionary import SemanticDictionary, load_dictionary, validate_against_schema
 
 REFUSAL_FALLBACK = "Não posso atender a esse pedido. Só respondo perguntas consultando os dados."
@@ -75,6 +76,13 @@ def resolve_chart(decision: AgentDecision, result: QueryResult | None) -> ChartS
     return ChartSpec(type="table")
 
 
+def _llm_phase(steps: list[Step]) -> ProgressKind:
+    """What the next LLM call is for, from the last thing that happened."""
+    if not steps:
+        return "planning"
+    return "fixing" if steps[-1].kind == "query_error" else "reviewing"
+
+
 class Assistant:
     """Public entry point: ``Assistant(llm, settings).ask(question) -> AgentResponse``."""
 
@@ -101,6 +109,7 @@ class Assistant:
     # ------------------------------------------------------------------ nodes
 
     def _load_context(self, state: AgentState) -> dict[str, object]:
+        report(Progress("context"))
         unreliable = self.dictionary.unreliable_columns()
         schema = discover_schema(
             self.settings.db_path,
@@ -115,6 +124,7 @@ class Assistant:
         steps = state["steps"]
         if state["llm_calls"] >= self.limits.max_steps:
             return {"response": self._fail(state, f"Limite de {self.limits.max_steps} passos atingido sem resposta.")}
+        report(Progress(_llm_phase(steps)))
         messages = build_messages(
             state["question"],
             state["context"],
@@ -161,6 +171,7 @@ class Assistant:
         )
         update: dict[str, object] = {}
         if isinstance(outcome, QueryError):
+            report(Progress("query_failed"))
             steps.append(
                 Step(index=index, kind="query_error", thought=decision.thought, sql=decision.sql, error=outcome.message)
             )
@@ -172,6 +183,7 @@ class Assistant:
                     f"A consulta continuou falhando após {self.limits.max_corrections} correções.",
                 )
         else:
+            report(Progress("query_done", rows=outcome.row_count, elapsed_ms=outcome.elapsed_ms))
             steps.append(
                 Step(
                     index=index,
@@ -271,7 +283,8 @@ class Assistant:
 
     # ------------------------------------------------------------------ entry
 
-    def ask(self, question: str) -> AgentResponse:
+    def ask(self, question: str, *, on_progress: Listener | None = None) -> AgentResponse:
+        """Answer ``question``; ``on_progress`` receives each stage as it starts (see ``src/progress.py``)."""
         started = time.monotonic()
         initial: AgentState = {
             "question": question,
@@ -286,7 +299,8 @@ class Assistant:
             "usage": TokenUsage(),
             "response": None,
         }
-        final = self._graph.invoke(initial, {"recursion_limit": 4 * self.limits.max_steps + 10})
+        with listening(on_progress):
+            final = self._graph.invoke(initial, {"recursion_limit": 4 * self.limits.max_steps + 10})
         response: AgentResponse = final["response"]
         response = response.model_copy(
             update={
