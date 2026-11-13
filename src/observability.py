@@ -23,6 +23,7 @@ def trace_record(response: AgentResponse) -> dict[str, Any]:
         "question": response.question,
         "status": response.status,
         "model": response.model,
+        "prompt_version": response.prompt_version,
         "latency_ms": response.latency_ms,
         "llm_calls": response.llm_calls,
         "cache_hits": response.cache_hits,

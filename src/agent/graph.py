@@ -24,7 +24,9 @@ from src.llm import LLMError, StructuredLLM
 from src.observability import Tracer
 from src.privacy import Pseudonymizer, load_pseudonymizer
 from src.progress import Listener, Progress, ProgressKind, listening, report
+from src.run_context import RunInfo, run_scope
 from src.semantic.dictionary import SemanticDictionary, load_dictionary, validate_against_schema
+from src.versioning import prompt_version
 
 REFUSAL_FALLBACK = "Não posso atender a esse pedido. Só respondo perguntas consultando os dados."
 
@@ -106,6 +108,7 @@ class Assistant:
         self.privacy = privacy or load_pseudonymizer(settings.db_path, self.dictionary.pii_columns())
         self.schema_warnings: list[str] = []
         self.schema: SchemaInfo | None = None
+        self.prompt_version = prompt_version(settings.dictionary_path)
         self._graph = self._build()
 
     # ------------------------------------------------------------------ nodes
@@ -302,7 +305,8 @@ class Assistant:
             "usage": TokenUsage(),
             "response": None,
         }
-        with listening(on_progress):
+        trace_id = uuid.uuid4().hex[:12]
+        with listening(on_progress), run_scope(RunInfo(trace_id, self.prompt_version)):
             final = self._graph.invoke(initial, {"recursion_limit": 4 * self.limits.max_steps + 10})
         response: AgentResponse = final["response"]
         if response.status == "answered" and response.data is not None and self.schema is not None:
@@ -315,7 +319,8 @@ class Assistant:
                 "latency_ms": round((time.monotonic() - started) * 1000, 1),
                 "model": final["model"] or self.llm.model_name,
                 "cache_hits": final["cache_hits"],
-                "trace_id": uuid.uuid4().hex[:12],
+                "trace_id": trace_id,
+                "prompt_version": self.prompt_version,
             }
         )
         if self.tracer is not None:

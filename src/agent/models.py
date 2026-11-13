@@ -99,3 +99,4 @@ class AgentResponse(BaseModel):
     latency_ms: float = 0.0
     model: str = ""
     trace_id: str = ""
+    prompt_version: str = ""  # see src/versioning.py
