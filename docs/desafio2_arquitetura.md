@@ -21,6 +21,10 @@ Tudo abaixo foi verificado nos arquivos do anexo (`pdfinfo`, `pdftotext`, `pdfim
 
 Pipeline determinístico em estágios, cada um idempotente, ligado por filas. O LLM entra só onde é necessário (classificação de baixa confiança e extração), e sempre com saída validada por schema.
 
+**Entrada.** O enunciado pede um script que processe todos os arquivos da pasta `data/raw/`. Esse é o modo lote: um comando lista a pasta e publica um evento por arquivo na mesma fila de ingestão. Em produção, o bucket de entrada ocupa o lugar da pasta, e os estágios seguintes não mudam.
+
+**Stack.** Python, com LangChain na chamada ao LLM: saída estruturada direto no schema Pydantic (`with_structured_output`) e troca de provedor ou de modelo sem mudar o código dos estágios. O LangGraph não entra no fluxo principal, porque os estágios são fixos e um pipeline com filas é mais barato de testar e operar (ver a seção 9). Ele cabe no ramo de revisão humana, onde o processamento precisa pausar, guardar o estado e retomar depois da correção.
+
 ```mermaid
 flowchart LR
     A[Upload / lote] --> B[(Bucket de entrada)]
@@ -238,7 +242,7 @@ Contratos e notas trazem nome, CPF, CNPJ e endereço.
 
 ## 10. Plano incremental
 
-1. Rotular os 50 documentos (conjunto-ouro) e implementar OCR → classificação nível 2 → extração com schema → validação, medindo contra o ouro.
+1. Rotular os 50 documentos de `data/raw/` (conjunto-ouro) e implementar OCR → classificação nível 2 → extração com schema → validação, medindo contra o ouro.
 2. Persistência, idempotência, dead-letter e a fila de revisão.
 3. Classificador nível 1 treinado com os rótulos acumulados; modelo de visão como fallback.
 4. Filas por tipo, autoscaling, APIs de lote e painel de custo.
