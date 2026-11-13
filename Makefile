@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: install lint typecheck test check run run-api eval
+.PHONY: install lint typecheck test check run run-api eval demo-cache
 
 install:
 	python3 -m venv .venv
@@ -28,3 +28,7 @@ run-api:
 # Avaliação com o Gemini real (gasta cota): make eval ARGS="--repeat 3"
 eval:
 	$(PY) -m src.evaluation $(ARGS)
+
+# Conversas da demo na ordem da tela: LLM_CACHE=on aquece, LLM_CACHE=replay confere
+demo-cache:
+	$(PY) -m src.demo_cache
