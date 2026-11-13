@@ -95,19 +95,40 @@ def classify_error(err: BaseException, model: str) -> LLMError:
     return LLMError(f"{model}: {type(err).__name__}: {err}")
 
 
-class GeminiLLM:
-    """Gemini through langchain-google-genai, temperature 0, JSON-schema structured output."""
+DEFAULT_VERTEX_LOCATION = "southamerica-east1"
 
-    def __init__(self, model: str, api_key: str, timeout_s: float = 60.0) -> None:
-        from langchain_google_genai import ChatGoogleGenerativeAI
+
+@dataclass(frozen=True)
+class VertexTarget:
+    """Vertex AI project and region; authentication comes from Application Default Credentials."""
+
+    project: str
+    location: str = DEFAULT_VERTEX_LOCATION
+
+
+class GeminiLLM:
+    """Gemini through langchain-google-genai, temperature 0, JSON-schema structured output.
+
+    AI Studio with ``api_key`` by default; Vertex AI when ``vertex`` is given (no key, ADC).
+    """
+
+    def __init__(
+        self, model: str, api_key: str = "", timeout_s: float = 60.0, *, vertex: VertexTarget | None = None
+    ) -> None:
+        import langchain_google_genai
 
         self._model = model
-        chat = ChatGoogleGenerativeAI(
+        backend: dict[str, Any] = (
+            {"vertexai": True, "project": vertex.project, "location": vertex.location}
+            if vertex is not None
+            else {"google_api_key": api_key}
+        )
+        chat = langchain_google_genai.ChatGoogleGenerativeAI(
             model=model,
-            google_api_key=api_key,
             temperature=0,
             timeout=timeout_s,
             max_retries=0,  # retries are owned by ResilientLLM, not hidden in the SDK
+            **backend,
         )
         self._runnable = chat.with_structured_output(AgentDecision, include_raw=True)
 
@@ -153,11 +174,13 @@ def get_llm() -> StructuredLLM:
 
     - ``GEMINI_MODELS``: ordered fallback list, ``model[:rpm]`` separated by commas.
     - ``LLM_CACHE``: ``on`` (default), ``off`` or ``replay`` (cache only, never calls the API).
+    - ``LLM_PROVIDER``: ``gemini`` (default, AI Studio, ``GOOGLE_API_KEY``) or ``vertex``
+      (``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``, Application Default Credentials).
     """
     from src.resilience import CachedLLM, FallbackLLM, OfflineLLM, QuotaStore, ResilientLLM
 
     provider = os.getenv("LLM_PROVIDER", "gemini").lower()
-    if provider != "gemini":
+    if provider not in ("gemini", "vertex"):
         raise LLMError(f"LLM_PROVIDER desconhecido: {provider!r}")
     specs = parse_model_specs(os.getenv("GEMINI_MODELS") or os.getenv("GEMINI_MODEL") or DEFAULT_GEMINI_MODELS)
     cache_mode = os.getenv("LLM_CACHE", "on").lower()
@@ -166,7 +189,13 @@ def get_llm() -> StructuredLLM:
     cache_dir = Path(os.getenv("LLM_CACHE_DIR", PROJECT_ROOT / ".cache" / "llm"))
 
     api_key = os.getenv("GOOGLE_API_KEY", "")
-    if cache_mode != "replay" and not api_key:
+    vertex: VertexTarget | None = None
+    if provider == "vertex" and cache_mode != "replay":
+        project = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+        if not project:
+            raise LLMError("GOOGLE_CLOUD_PROJECT não definida para LLM_PROVIDER=vertex.")
+        vertex = VertexTarget(project, os.getenv("GOOGLE_CLOUD_LOCATION") or DEFAULT_VERTEX_LOCATION)
+    elif cache_mode != "replay" and not api_key:
         raise LLMError("GOOGLE_API_KEY não definida. Copie .env.example para .env e preencha a chave.")
 
     quota = QuotaStore(cache_dir / "quota.json")
@@ -175,6 +204,6 @@ def get_llm() -> StructuredLLM:
         if cache_mode == "replay":
             chain.append(CachedLLM(OfflineLLM(model), cache_dir, mode="replay"))
             continue
-        llm: StructuredLLM = ResilientLLM(GeminiLLM(model, api_key), rpm=rpm, quota=quota)
+        llm: StructuredLLM = ResilientLLM(GeminiLLM(model, api_key, vertex=vertex), rpm=rpm, quota=quota)
         chain.append(CachedLLM(llm, cache_dir) if cache_mode == "on" else llm)
     return chain[0] if len(chain) == 1 else FallbackLLM(chain)
