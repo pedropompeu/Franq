@@ -13,6 +13,7 @@ keyed containers listed in ``src/ui/style.py``.
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,8 +69,21 @@ def runtime() -> Runtime:
     return Runtime(settings, tracer, assistant, error, view.coverage(schema, unreliable), columns)
 
 
+def new_conversation() -> None:
+    """Forget the conversation: a new thread for the agent's memory and an empty screen."""
+    st.session_state.thread_id = uuid.uuid4().hex
+    st.session_state.history = []
+
+
 def render_sidebar(rt: Runtime) -> None:
     with st.sidebar:
+        st.button(
+            texts.NEW_CONVERSATION,
+            help=texts.NEW_CONVERSATION_HELP,
+            icon=":material/add_comment:",
+            on_click=new_conversation,
+            disabled=rt.assistant is None,
+        )
         st.markdown(f"### {texts.SIDEBAR_ABOUT}")
         st.caption(texts.TAGLINE)
         if rt.assistant is None:
@@ -247,7 +261,7 @@ def ask(rt: Runtime, question: str) -> None:
             box.update(label=log.label, expanded=True)  # without expanded, Streamlit 1.67 collapses it
             checklist.markdown("  \n".join(f":material/check: {line}" for line in log.done))
 
-        response = rt.assistant.ask(question, on_progress=show)
+        response = rt.assistant.ask(question, thread_id=st.session_state.thread_id, on_progress=show)
         # Collapse before the rerun: the answer's "how I got here" expander takes this element's place
         # in the page and would otherwise inherit its open state.
         box.update(state="complete", expanded=False)
@@ -340,6 +354,8 @@ def main() -> None:
     rt = runtime()
     st.html(style.CSS_PATH)
     st.session_state.setdefault("history", [])
+    if "thread_id" not in st.session_state:  # one conversation per browser session, kept by the agent
+        st.session_state.thread_id = uuid.uuid4().hex
     render_sidebar(rt)
     with st.container(key=style.MASTHEAD):
         st.html(style.banner_html())

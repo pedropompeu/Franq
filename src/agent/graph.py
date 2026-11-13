@@ -1,21 +1,29 @@
-"""LangGraph agent: context → decide → (execute ↺ | finalize | refuse).
+"""LangGraph agent: context → decide → (execute ↺ | finalize | refuse) → remember.
 
 Single agent with clearly separated nodes (no multi-agent: saves quota and keeps the flow
 auditable). Limits: at most ``max_steps`` LLM decisions and ``max_corrections`` failed
 queries per question.
+
+Memory: the graph is compiled with an in-memory checkpointer, so each ``thread_id`` keeps its
+``history`` (masked question, SQL and answer of every finished turn) between calls. Everything
+else in the state is per question and reset by ``ask``. Without a ``thread_id`` the call runs on
+a throwaway thread that is deleted afterwards: no memory, as before.
 """
 
 from __future__ import annotations
 
+import operator
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Annotated, Literal, TypedDict
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from src.agent.models import AgentDecision, AgentResponse, ChartSpec, Step, TokenUsage
+from src.agent.models import AgentDecision, AgentResponse, ChartSpec, Step, TokenUsage, Turn
 from src.agent.notices import compute_notices
 from src.agent.prompts import build_context, build_messages
 from src.config import Settings
@@ -31,7 +39,9 @@ from src.versioning import prompt_version
 REFUSAL_FALLBACK = "Não posso atender a esse pedido. Só respondo perguntas consultando os dados."
 
 
-class AgentState(TypedDict):
+class QuestionState(TypedDict):
+    """What ``ask`` resets at the start of every question."""
+
     question: str
     context: str
     steps: list[Step]
@@ -43,6 +53,10 @@ class AgentState(TypedDict):
     model: str
     usage: TokenUsage
     response: AgentResponse | None
+
+
+class AgentState(QuestionState):
+    history: Annotated[list[Turn], operator.add]  # the only key that survives between questions
 
 
 @dataclass(frozen=True)
@@ -109,6 +123,7 @@ class Assistant:
         self.schema_warnings: list[str] = []
         self.schema: SchemaInfo | None = None
         self.prompt_version = prompt_version(settings.dictionary_path)
+        self._memory = InMemorySaver()
         self._graph = self._build()
 
     # ------------------------------------------------------------------ nodes
@@ -139,6 +154,7 @@ class Assistant:
             max_rows=self.settings.max_rows_for_llm,
             remaining_steps=self.limits.max_steps - state["llm_calls"],
             privacy=self.privacy,
+            history=state["history"],
         )
         try:
             reply = self.llm.decide(messages)
@@ -258,19 +274,34 @@ class Assistant:
             usage=state["usage"],
         )
 
+    def _remember(self, state: AgentState) -> dict[str, object]:
+        """Append the finished turn to the thread's history, masked and without result rows."""
+        response = state["response"]
+        if response is None:  # unreachable by routing; guards against graph wiring mistakes
+            raise RuntimeError("remember reached without a response")
+        p = self.privacy
+        sql = response.data.sql if response.data is not None else ""
+        turn = Turn(
+            question=p.mask(response.question),
+            sql=p.mask(sql),
+            answer=p.mask(response.answer),
+            status=response.status,
+        )
+        return {"history": [turn]}
+
     # ---------------------------------------------------------------- routing
 
     @staticmethod
-    def _after_decide(state: AgentState) -> Literal["execute", "finalize", "refuse", "__end__"]:
+    def _after_decide(state: AgentState) -> Literal["execute", "finalize", "refuse", "remember"]:
         if state["response"] is not None or state["decision"] is None:
-            return "__end__"
+            return "remember"
         return {"run_query": "execute", "final_answer": "finalize", "refuse": "refuse"}[  # type: ignore[return-value]
             state["decision"].action
         ]
 
     @staticmethod
-    def _loop_or_end(state: AgentState) -> Literal["decide", "__end__"]:
-        return "__end__" if state["response"] is not None else "decide"
+    def _loop_or_end(state: AgentState) -> Literal["decide", "remember"]:
+        return "remember" if state["response"] is not None else "decide"
 
     def _build(self) -> CompiledStateGraph:  # type: ignore[type-arg]
         graph = StateGraph(AgentState)
@@ -279,20 +310,26 @@ class Assistant:
         graph.add_node("execute", self._execute)
         graph.add_node("finalize", self._finalize)
         graph.add_node("refuse", self._refuse)
+        graph.add_node("remember", self._remember)
         graph.add_edge(START, "load_context")
         graph.add_edge("load_context", "decide")
         graph.add_conditional_edges("decide", self._after_decide)
         graph.add_conditional_edges("execute", self._loop_or_end)
         graph.add_conditional_edges("finalize", self._loop_or_end)
-        graph.add_edge("refuse", END)
-        return graph.compile()
+        graph.add_edge("refuse", "remember")
+        graph.add_edge("remember", END)
+        return graph.compile(checkpointer=self._memory)
 
     # ------------------------------------------------------------------ entry
 
-    def ask(self, question: str, *, on_progress: Listener | None = None) -> AgentResponse:
-        """Answer ``question``; ``on_progress`` receives each stage as it starts (see ``src/progress.py``)."""
+    def ask(self, question: str, *, thread_id: str | None = None, on_progress: Listener | None = None) -> AgentResponse:
+        """Answer ``question``; ``on_progress`` receives each stage as it starts (see ``src/progress.py``).
+
+        Questions with the same ``thread_id`` share a conversation: the model sees the last turns and
+        can resolve follow-ups like "e no Chat?". ``None`` means a standalone question.
+        """
         started = time.monotonic()
-        initial: AgentState = {
+        initial: QuestionState = {
             "question": question,
             "context": "",
             "steps": [],
@@ -304,10 +341,19 @@ class Assistant:
             "model": "",
             "usage": TokenUsage(),
             "response": None,
-        }
+        }  # ``history`` is not reset: the checkpointer carries it over from earlier turns
         trace_id = uuid.uuid4().hex[:12]
-        with listening(on_progress), run_scope(RunInfo(trace_id, self.prompt_version)):
-            final = self._graph.invoke(initial, {"recursion_limit": 4 * self.limits.max_steps + 10})
+        thread = thread_id or uuid.uuid4().hex
+        config: RunnableConfig = {
+            "configurable": {"thread_id": thread},
+            "recursion_limit": 4 * self.limits.max_steps + 10,
+        }
+        try:
+            with listening(on_progress), run_scope(RunInfo(trace_id, self.prompt_version, thread_id)):
+                final = self._graph.invoke(initial, config)
+        finally:
+            if thread_id is None:
+                self._memory.delete_thread(thread)
         response: AgentResponse = final["response"]
         if response.status == "answered" and response.data is not None and self.schema is not None:
             notices = compute_notices(response.data.sql, response.data, self.schema, self.settings)
@@ -326,6 +372,11 @@ class Assistant:
         if self.tracer is not None:
             self.tracer.write(self._masked(response))
         return self._unmasked(response)
+
+    def history(self, thread_id: str) -> list[Turn]:
+        """The turns kept for ``thread_id`` (masked), oldest first; empty for an unknown thread."""
+        snapshot = self._graph.get_state({"configurable": {"thread_id": thread_id}})
+        return list(snapshot.values.get("history", []))
 
     def _unmasked(self, response: AgentResponse) -> AgentResponse:
         """What the user sees: the model's tokens turned back into real values."""

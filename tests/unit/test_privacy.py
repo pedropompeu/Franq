@@ -122,3 +122,29 @@ def test_trace_keeps_question_and_sql_masked(settings: Settings) -> None:
     Assistant(FakeLLM([query(sql), answer(sql, "ok")]), settings, tracer=tracer).ask(f"E-mail de {nome}?")
     raw = settings.trace_path.read_text(encoding="utf-8")
     assert nome not in raw and "[nome_1]" in raw
+
+
+def test_empty_history_keeps_prompt_identical() -> None:
+    messages = build_messages("Q?", "ctx", [], {}, max_rows=10, remaining_steps=3, history=())
+    assert messages[1].content == (  # byte for byte the prompt before memory existed: the LLM cache stays valid
+        "ctx\n\n# Pergunta do usuário\nQ?\n\n# Passos até agora\nNenhum passo executado ainda.\n\n"
+        "Você ainda tem 3 decisão(ões). Decida o próximo passo."
+    )
+
+
+def test_history_is_masked(settings: Settings) -> None:
+    nome, email = first_client(settings.db_path)
+    sql = "SELECT email FROM clientes WHERE nome = '[nome_1]'"
+    llm = FakeLLM([query(sql), answer(sql, "É [email_1]."), query(sql), answer(sql, "Sim, [email_1].")])
+    assistant = Assistant(llm, settings)
+    first = assistant.ask(f"Qual o e-mail de {nome}?", thread_id="pii")
+    assistant.ask("Tem certeza?", thread_id="pii")
+
+    assert first.answer == f"É {email}."  # the user still sees the real value
+    turn = assistant.history("pii")[0]
+    stored = turn.model_dump_json()
+    assert nome not in stored and email not in stored
+    assert turn.question == "Qual o e-mail de [nome_1]?" and "'[nome_1]'" in turn.sql
+    assert turn.answer == "É [email_1]." and turn.status == "answered"
+    assert nome not in llm.prompts[-1] and email not in llm.prompts[-1]
+    assert "Pergunta: Qual o e-mail de [nome_1]?" in llm.prompts[-1]

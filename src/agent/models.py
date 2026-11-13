@@ -100,3 +100,19 @@ class AgentResponse(BaseModel):
     model: str = ""
     trace_id: str = ""
     prompt_version: str = ""  # see src/versioning.py
+
+
+TurnStatus = Literal["answered", "refused", "failed"]
+
+
+class Turn(BaseModel):
+    """One finished question of a conversation, as the next prompt sees it.
+
+    Everything is masked (``[nome_N]`` tokens instead of personal values) and there are no result
+    rows: the model must query again for numbers, and the checkpoint never keeps what the user saw.
+    """
+
+    question: str
+    sql: str = ""
+    answer: str
+    status: TurnStatus

@@ -152,3 +152,10 @@ METRIC_HELP: Final = {
     ),
 }
 TRACES_METRICS_CAPTION: Final = "Métricas das últimas {n} perguntas registradas."
+
+# --- B: memória
+NEW_CONVERSATION: Final = "Nova conversa"
+NEW_CONVERSATION_HELP: Final = (
+    'Na mesma conversa, o Indaga entende continuações como "E só no Chat?". '
+    "Uma conversa nova esquece as perguntas anteriores e limpa a tela."
+)

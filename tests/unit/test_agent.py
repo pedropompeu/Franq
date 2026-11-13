@@ -194,3 +194,78 @@ def test_trace_has_no_result_rows(settings: Settings) -> None:
     record = json.loads(raw.splitlines()[-1])
     assert record["result_rows"] == 3 and record["steps"][0]["sql"] == sql
     assert tracer.tail(1)[0]["trace_id"] == response.trace_id
+
+
+# ------------------------------------------------------- conversation memory
+
+P4_SQL = "SELECT canal, COUNT(*) AS tickets FROM suporte GROUP BY canal ORDER BY canal"
+CHAT_SQL = "SELECT COUNT(*) AS tickets FROM suporte WHERE canal = 'Chat'"
+
+
+def turn(sql: str, text: str) -> list[AgentDecision]:
+    """One question answered the usual way: run the query, then answer with it."""
+    return [query(sql), answer(sql, text)]
+
+
+def test_follow_up_sees_previous_turn(settings: Settings) -> None:
+    llm = FakeLLM([*turn(P4_SQL, "Tickets por canal."), *turn(CHAT_SQL, "No Chat.")])
+    assistant = Assistant(llm, settings)
+    assistant.ask("Quantos tickets por canal?", thread_id="t1")
+    response = assistant.ask("E só no Chat?", thread_id="t1")
+
+    assert response.status == "answered"
+    follow_up = llm.prompts[-1]
+    assert "# Conversa anterior (mais antiga primeiro)" in follow_up
+    assert "Pergunta: Quantos tickets por canal?" in follow_up
+    assert f"SQL usada: {P4_SQL}" in follow_up and "Resposta: Tickets por canal." in follow_up
+    assert follow_up.index("# Conversa anterior") < follow_up.index("# Pergunta do usuário")
+
+
+def test_threads_are_isolated(settings: Settings) -> None:
+    llm = FakeLLM([*turn(P4_SQL, "Tickets por canal."), *turn(CHAT_SQL, "No Chat.")])
+    assistant = Assistant(llm, settings)
+    assistant.ask("Quantos tickets por canal?", thread_id="a")
+    assistant.ask("E só no Chat?", thread_id="b")
+
+    assert "# Conversa anterior" not in llm.prompts[-1]
+
+
+def test_no_thread_id_means_no_memory(settings: Settings) -> None:
+    llm = FakeLLM([*turn(P4_SQL, "Tickets por canal."), *turn(CHAT_SQL, "No Chat.")])
+    assistant = Assistant(llm, settings)
+    assistant.ask("Quantos tickets por canal?")
+    assistant.ask("E só no Chat?")
+
+    assert "# Conversa anterior" not in llm.prompts[-1]
+
+
+def test_per_question_state_resets(settings: Settings) -> None:
+    llm = FakeLLM([query("SELECT nao_existe FROM suporte"), *turn(P4_SQL, "Por canal."), *turn(CHAT_SQL, "Chat.")])
+    assistant = Assistant(llm, settings)
+    first = assistant.ask("Tickets por canal?", thread_id="t")
+    second = assistant.ask("E no Chat?", thread_id="t")
+
+    assert first.corrections == 1
+    assert second.corrections == 0 and second.llm_calls == 2
+    assert [s.kind for s in second.steps] == ["query", "answer"]
+    assert "# Passos até agora\nNenhum passo executado ainda." in llm.prompts[-2]
+
+
+def test_history_prompt_keeps_last_three_turns(settings: Settings) -> None:
+    llm = FakeLLM([d for i in range(1, 6) for d in turn(CHAT_SQL, f"Resposta {i}.")])
+    assistant = Assistant(llm, settings)
+    for i in range(1, 6):
+        assistant.ask(f"Pergunta número {i}?", thread_id="longa")
+
+    last = llm.prompts[-1]
+    assert "Pergunta número 1?" not in last
+    assert all(f"Pergunta: Pergunta número {i}?" in last for i in (2, 3, 4))
+    assert last.index("Pergunta número 2?") < last.index("Pergunta número 4?")
+
+
+def test_standalone_questions_leave_no_checkpoint(settings: Settings) -> None:
+    assistant = Assistant(FakeLLM([*turn(CHAT_SQL, "Chat."), LLMError("429 quota")]), settings)
+    assistant.ask("Tickets no Chat?")
+    assistant.ask("De novo?")  # a failed call is cleaned up too
+
+    assert list(assistant._memory.list(None)) == []  # a long-running app would otherwise leak one thread per call

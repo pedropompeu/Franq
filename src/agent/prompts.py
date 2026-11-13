@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from src.agent.models import Step
+from src.agent.models import Step, Turn
 from src.db.tools import QueryResult
 from src.privacy import PROMPT_NOTE, TOKEN, Pseudonymizer
 
@@ -85,6 +86,30 @@ def render_history(
     return "\n\n".join(parts)
 
 
+HISTORY_TURNS = 3  # earlier turns shown to the model; older ones stay in the checkpoint only
+
+CONVERSATION_NOTE = (
+    'Use a conversa só para resolver referências da nova pergunta (ex.: "e no Chat?"). '
+    "Os números da resposta devem vir de uma consulta nova."
+)
+
+
+def render_conversation(history: Sequence[Turn], privacy: Pseudonymizer | None = None) -> str:
+    """The last ``HISTORY_TURNS`` turns, oldest first, ending in a blank line; empty without history.
+
+    Turns are stored masked already; masking again costs nothing and keeps the rule in one place.
+    """
+    if not history:
+        return ""
+    privacy = privacy or Pseudonymizer()
+    turns = [
+        f"Pergunta: {privacy.mask(t.question)}\nSQL usada: {privacy.mask(t.sql) or '(nenhuma)'}\n"
+        f"Resposta: {privacy.mask(t.answer)}"
+        for t in history[-HISTORY_TURNS:]
+    ]
+    return "# Conversa anterior (mais antiga primeiro)\n" + "\n\n".join(turns) + f"\n\n{CONVERSATION_NOTE}\n\n"
+
+
 def build_messages(
     question: str,
     context: str,
@@ -94,13 +119,18 @@ def build_messages(
     max_rows: int,
     remaining_steps: int,
     privacy: Pseudonymizer | None = None,
+    history: Sequence[Turn] = (),
 ) -> list[BaseMessage]:
-    """Everything that leaves for the model is masked; with no personal data the prompt is unchanged."""
+    """Everything that leaves for the model is masked; with no personal data the prompt is unchanged.
+
+    ``history`` holds the earlier turns of the conversation; without it the prompt is byte for byte
+    the one from before memory existed, so cached answers stay valid.
+    """
     privacy = privacy or Pseudonymizer()
-    history = render_history(steps, results, max_rows, privacy)
+    past = render_history(steps, results, max_rows, privacy)
     user = (
-        f"{context}\n\n# Pergunta do usuário\n{privacy.mask(question)}\n\n# Passos até agora\n{history}\n\n"
-        f"Você ainda tem {remaining_steps} decisão(ões). Decida o próximo passo."
+        f"{context}\n\n{render_conversation(history, privacy)}# Pergunta do usuário\n{privacy.mask(question)}\n\n"
+        f"# Passos até agora\n{past}\n\nVocê ainda tem {remaining_steps} decisão(ões). Decida o próximo passo."
     )
     if TOKEN.search(user):
         user += f"\n\n# Dados pessoais\n{PROMPT_NOTE}"
