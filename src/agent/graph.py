@@ -20,13 +20,16 @@ from typing import Annotated, Literal, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from src.agent import models
 from src.agent.models import AgentDecision, AgentResponse, ChartSpec, Step, TokenUsage, Turn
 from src.agent.notices import compute_notices
 from src.agent.prompts import build_context, build_messages
 from src.config import Settings
+from src.db import tools
 from src.db.tools import QueryError, QueryResult, SchemaInfo, discover_schema, run_sql
 from src.llm import LLMError, StructuredLLM
 from src.observability import Tracer
@@ -57,6 +60,24 @@ class QuestionState(TypedDict):
 
 class AgentState(QuestionState):
     history: Annotated[list[Turn], operator.add]  # the only key that survives between questions
+
+
+# Our types that the checkpointer may store and read back. LangGraph only warns today about a type
+# outside this list, but its strict mode (and a future version) refuses to deserialize it.
+_CHECKPOINT_TYPES: tuple[type, ...] = (
+    models.AgentDecision,
+    models.AgentResponse,
+    models.ChartSpec,
+    models.Notice,
+    models.Step,
+    models.TokenUsage,
+    models.Turn,
+    tools.ColumnInfo,
+    tools.QueryError,
+    tools.QueryResult,
+    tools.SchemaInfo,
+    tools.TableInfo,
+)
 
 
 @dataclass(frozen=True)
@@ -123,7 +144,7 @@ class Assistant:
         self.schema_warnings: list[str] = []
         self.schema: SchemaInfo | None = None
         self.prompt_version = prompt_version(settings.dictionary_path)
-        self._memory = InMemorySaver()
+        self._memory = InMemorySaver(serde=JsonPlusSerializer(allowed_msgpack_modules=_CHECKPOINT_TYPES))
         self._graph = self._build()
 
     # ------------------------------------------------------------------ nodes

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from langchain_core.messages import BaseMessage
+from langgraph.checkpoint.serde.event_hooks import SerdeEvent, register_serde_event_listener
 
 from src.agent.graph import AgentLimits, Assistant, resolve_chart
 from src.agent.models import AgentDecision, TokenUsage
@@ -219,6 +220,22 @@ def test_follow_up_sees_previous_turn(settings: Settings) -> None:
     assert "Pergunta: Quantos tickets por canal?" in follow_up
     assert f"SQL usada: {P4_SQL}" in follow_up and "Resposta: Tickets por canal." in follow_up
     assert follow_up.index("# Conversa anterior") < follow_up.index("# Pergunta do usuário")
+
+
+def test_checkpoint_types_are_registered(settings: Settings) -> None:
+    """LangGraph warns (and will later refuse) when a checkpoint holds a type outside its allowlist."""
+    events: list[SerdeEvent] = []
+    unregister = register_serde_event_listener(events.append)
+    try:
+        llm = FakeLLM([*turn(P4_SQL, "Tickets por canal."), *turn(CHAT_SQL, "No Chat.")])
+        assistant = Assistant(llm, settings)
+        assistant.ask("Quantos tickets por canal?", thread_id="t1")
+        assistant.ask("E só no Chat?", thread_id="t1")
+        assert len(assistant.history("t1")) == 2
+    finally:
+        unregister()
+
+    assert [(e["kind"], e["module"], e["name"]) for e in events] == []
 
 
 def test_threads_are_isolated(settings: Settings) -> None:
