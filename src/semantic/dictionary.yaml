@@ -14,7 +14,8 @@ reference_date:
   rule: >-
     Datas relativas ("último ano", "últimos 3 meses", "este mês") usam como referência a data
     mais recente registrada no banco, nunca a data de hoje do sistema. Mês citado sem ano
-    ("em maio") refere-se à ocorrência mais recente desse mês dentro dos dados.
+    ("em maio") refere-se à ocorrência mais recente desse mês dentro dos dados: filtrar por ano e
+    mês (strftime('%Y-%m', ...)), nunca só pelo mês, porque o mesmo mês pode aparecer em dois anos.
   coverage_note: >-
     Os dados cobrem cerca de 12 meses. Um ano civil pode estar incompleto: declarar a cobertura
     real (primeira e última data) sempre que a pergunta citar um ano.
