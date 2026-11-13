@@ -37,6 +37,7 @@ import re
 import sqlite3
 import statistics
 import sys
+import uuid
 from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import closing
@@ -77,6 +78,7 @@ KIND_LABEL = {
     "injecao": "Injeção",
     "autocorrecao": "Autocorreção (falha injetada)",
     "injecao_dados": "Injeção nos dados",
+    "acompanhamento": "Acompanhamento",
 }
 CHECK_LABEL = {
     "status": "status",
@@ -104,6 +106,7 @@ class EvalCase(BaseModel):
     inject_fault: bool = False
     plant_instruction: bool = False
     expect_notice: NoticeKind | None = None
+    context: list[str] = Field(default_factory=list)  # earlier questions in the same thread
 
     @property
     def needs_result(self) -> bool:
@@ -332,10 +335,14 @@ def run_case(
     references: list[Table],
     privacy: Pseudonymizer,
 ) -> CaseRun:
-    guard.leaks = 0
+    guard.leaks = 0  # the leak guard covers the context questions too
+    injector.armed = injector.planting = False
+    thread_id = uuid.uuid4().hex if case.context else None
+    for earlier in case.context:
+        assistant.ask(privacy.unmask(earlier), thread_id=thread_id)
     injector.armed = case.inject_fault
     injector.planting = case.plant_instruction
-    response = assistant.ask(privacy.unmask(case.question))
+    response = assistant.ask(privacy.unmask(case.question), thread_id=thread_id)
     checks = evaluate_response(case, response, references, privacy, guard.leaks)
     final_sql = response.data.sql if response.data is not None else ""
     return CaseRun(

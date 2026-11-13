@@ -357,3 +357,49 @@ def test_main_saves_baseline_only_when_asked(tmp_path: Path, monkeypatch: pytest
     assert evaluation.main(args) == 0 and not baseline.exists()
     assert evaluation.main([*args, "--save-baseline"]) == 0
     assert json.loads(baseline.read_text(encoding="utf-8"))["cases"] == {"E1": {"passed": 1, "runs": 1}}
+
+
+# ---------------------------------------------------------------- follow-up questions
+
+
+class ThreadSpyAssistant:
+    """Records (question, thread_id) and answers every question the same way."""
+
+    prompt_version = "spy"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    def ask(self, question: str, *, thread_id: str | None = None, on_progress: object = None) -> AgentResponse:
+        self.calls.append((question, thread_id))
+        return AgentResponse(question=question, status="answered", answer="18.")
+
+
+def test_context_questions_share_a_thread(settings: Settings) -> None:
+    privacy = load_pseudonymizer(settings.db_path, load_dictionary(DICTIONARY).pii_columns())
+    followup = case(id="M9", kind="acompanhamento", context=["Reclamações por canal?"], question="E só no Chat?")
+    spy = ThreadSpyAssistant()
+    guard = LeakGuard(FakeLLM([]), privacy)
+    injector = evaluation.FaultInjector(guard)
+    for _ in range(2):
+        evaluation.run_case(followup, spy, guard, injector, [], privacy)  # type: ignore[arg-type]
+    (q1, t1), (q2, t2), (q3, t3), (q4, t4) = spy.calls
+    assert (q1, q2, q3, q4) == ("Reclamações por canal?", "E só no Chat?", "Reclamações por canal?", "E só no Chat?")
+    assert t1 is not None and t1 == t2
+    assert t3 is not None and t3 == t4
+    assert t1 != t3  # each execution starts a fresh conversation
+
+
+def test_question_without_context_has_no_thread(settings: Settings) -> None:
+    privacy = load_pseudonymizer(settings.db_path, load_dictionary(DICTIONARY).pii_columns())
+    spy = ThreadSpyAssistant()
+    guard = LeakGuard(FakeLLM([]), privacy)
+    evaluation.run_case(case(), spy, guard, evaluation.FaultInjector(guard), [], privacy)  # type: ignore[arg-type]
+    assert spy.calls == [("?", None)]
+
+
+def test_followup_cases_are_labelled() -> None:
+    followups = [c for c in load_cases() if c.kind == "acompanhamento"]
+    assert {c.id for c in followups} == {"M1", "M2"}
+    assert all(c.context for c in followups)
+    assert evaluation.KIND_LABEL["acompanhamento"] == "Acompanhamento"
