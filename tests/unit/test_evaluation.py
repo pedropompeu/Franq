@@ -3,27 +3,37 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from langchain_core.messages import HumanMessage
 
+from src import evaluation
 from src.agent.graph import Assistant
-from src.agent.models import AgentDecision
+from src.agent.models import AgentDecision, AgentResponse, Notice
 from src.config import Settings
+from src.db.tools import QueryResult
 from src.evaluation import (
     PLANTED_COLUMN,
     PLANTED_MARKER,
     QUESTIONS_PATH,
+    CaseRun,
     EvalCase,
+    EvalReport,
     LeakGuard,
+    Regression,
+    compare_baseline,
+    evaluate_response,
     load_cases,
     plant_instruction,
     render_report,
     result_matches,
     run_evaluation,
     run_reference,
+    write_baseline,
 )
 from src.llm import StructuredLLM
 from src.privacy import Pseudonymizer, load_pseudonymizer
@@ -229,3 +239,121 @@ def test_obeying_the_planted_instruction_fails_the_case(settings: Settings) -> N
 
 def test_plant_instruction_leaves_text_without_data_unchanged() -> None:
     assert plant_instruction("sem bloco de dados") == "sem bloco de dados"
+
+
+# ---------------------------------------------------------------- notices
+
+
+def _answered(rows: int, notices: list[Notice]) -> AgentResponse:
+    data = QueryResult(
+        sql="SELECT 1", columns=["estado", "n"], rows=[["X", 1]] * rows, row_count=rows, truncated=False, elapsed_ms=1
+    )
+    return AgentResponse(question="?", status="answered", answer="ok", data=data, notices=notices)
+
+
+def _notice_check(c: EvalCase, response: AgentResponse) -> bool:
+    return evaluate_response(c, response, [], Pseudonymizer(), 0)["notice"]
+
+
+def test_tie_check_accepts_notice_or_all_tied_rows() -> None:
+    e1 = case("ranking", rank_by=1, k=5, expect_notice="tie_at_cut")
+    tie = Notice(kind="tie_at_cut", text="Empate no corte do top 5.")
+    assert _notice_check(e1, _answered(5, [tie]))
+    assert _notice_check(e1, _answered(6, []))
+    assert not _notice_check(e1, _answered(5, []))
+    assert evaluation.CHECK_LABEL["notice"] == "aviso"
+
+
+def test_partial_period_check_requires_notice() -> None:
+    e2 = case(expect_notice="partial_period")
+    partial = Notice(kind="partial_period", text="O ano de 2024 está incompleto.")
+    assert _notice_check(e2, _answered(1, [partial]))
+    assert not _notice_check(e2, _answered(1, []))
+    assert not _notice_check(e2, _answered(1, [Notice(kind="tie_at_cut", text="x")]))
+    assert "notice" not in evaluate_response(case(), _answered(1, []), [], Pseudonymizer(), 0)
+
+
+# ---------------------------------------------------------------- baseline
+
+
+def _run(case_id: str, passed: bool) -> CaseRun:
+    return CaseRun(
+        case=case(id=case_id),
+        status="answered",
+        checks={"status": passed},
+        llm_calls=1,
+        corrections=0,
+        cache_hits=0,
+        latency_ms=1.0,
+        input_tokens=1,
+        output_tokens=1,
+        leaks=0,
+        sql="",
+        model="m",
+    )
+
+
+def _report(*runs: tuple[str, bool], repeat: int = 1) -> EvalReport:
+    return EvalReport(
+        runs=[_run(i, ok) for i, ok in runs],
+        repeat=repeat,
+        cache_mode="off",
+        models="m",
+        db_unchanged=True,
+        started=datetime(2026, 11, 13, 20, 0),
+        elapsed_s=1.0,
+        prompt_version="abcd1234",
+    )
+
+
+def test_baseline_round_trip(tmp_path: Path) -> None:
+    report = _report(("E1", True), ("E2", False), ("E1", True), ("E2", True), repeat=2)
+    path = tmp_path / "avaliacao.json"
+    write_baseline(report, path)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored["prompt_version"] == "abcd1234" and stored["models"] == "m"
+    assert stored["cases"] == {"E1": {"passed": 2, "runs": 2}, "E2": {"passed": 1, "runs": 2}}
+    assert compare_baseline(report, stored) == []
+
+
+def test_regression_detected_when_pass_rate_drops(tmp_path: Path) -> None:
+    path = tmp_path / "avaliacao.json"
+    write_baseline(_report(("E1", True), ("E1", True), ("E1", True), repeat=3), path)
+    after = _report(("E1", True), ("E1", False), ("E1", True), repeat=3)
+    assert compare_baseline(after, json.loads(path.read_text(encoding="utf-8"))) == [Regression("E1", 1.0, 0.667)]
+
+
+def test_baseline_compares_common_cases_only() -> None:
+    baseline = {"cases": {"X9": {"passed": 3, "runs": 3}}}
+    assert compare_baseline(_report(("N1", False)), baseline) == []
+
+
+def test_report_shows_prompt_version_and_comparison() -> None:
+    report = _report(("E1", False))
+    text = render_report(report, [Regression("E1", 1.0, 0.0)])
+    assert "prompt `abcd1234`" in text
+    assert "## Comparação com a rodada anterior" in text and "| E1 | 100% | 0% |" in text
+    assert "## Comparação com a rodada anterior" not in render_report(report)
+
+
+def test_main_exits_3_on_regression(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = tmp_path / "avaliacao.json"
+    write_baseline(_report(("E1", True)), baseline)
+    monkeypatch.setenv("LLM_CACHE", "off")
+    monkeypatch.setattr(evaluation, "get_llm", lambda: FakeLLM([]))
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda *_a, **_k: _report(("E1", False)))
+    out = tmp_path / "r.md"
+    assert evaluation.main(["--only", "E1", "--baseline", str(baseline), "--output", str(out)]) == 3
+    assert "| E1 | 100% | 0% |" in out.read_text(encoding="utf-8")
+    assert evaluation.main(["--only", "E1", "--no-baseline", "--output", str(out)]) == 0
+
+
+def test_main_saves_baseline_only_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = tmp_path / "avaliacao.json"
+    monkeypatch.setenv("LLM_CACHE", "off")
+    monkeypatch.setattr(evaluation, "get_llm", lambda: FakeLLM([]))
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda *_a, **_k: _report(("E1", True)))
+    args = ["--baseline", str(baseline), "--output", str(tmp_path / "r.md")]
+    assert evaluation.main(args) == 0 and not baseline.exists()
+    assert evaluation.main([*args, "--save-baseline"]) == 0
+    assert json.loads(baseline.read_text(encoding="utf-8"))["cases"] == {"E1": {"passed": 1, "runs": 1}}
