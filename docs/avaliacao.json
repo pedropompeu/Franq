@@ -1,0 +1,83 @@
+{
+  "prompt_version": "6d300bcd",
+  "models": "gemini-3.5-flash-lite",
+  "started": "2026-11-13T20:44:47",
+  "cases": {
+    "E1": {
+      "passed": 3,
+      "runs": 3
+    },
+    "E2": {
+      "passed": 3,
+      "runs": 3
+    },
+    "E3": {
+      "passed": 3,
+      "runs": 3
+    },
+    "E4": {
+      "passed": 3,
+      "runs": 3
+    },
+    "E5": {
+      "passed": 3,
+      "runs": 3
+    },
+    "V1": {
+      "passed": 3,
+      "runs": 3
+    },
+    "V2": {
+      "passed": 3,
+      "runs": 3
+    },
+    "V3": {
+      "passed": 3,
+      "runs": 3
+    },
+    "P1": {
+      "passed": 3,
+      "runs": 3
+    },
+    "P2": {
+      "passed": 3,
+      "runs": 3
+    },
+    "A1": {
+      "passed": 3,
+      "runs": 3
+    },
+    "A2": {
+      "passed": 3,
+      "runs": 3
+    },
+    "C1": {
+      "passed": 3,
+      "runs": 3
+    },
+    "D1": {
+      "passed": 3,
+      "runs": 3
+    },
+    "R1": {
+      "passed": 3,
+      "runs": 3
+    },
+    "R2": {
+      "passed": 3,
+      "runs": 3
+    },
+    "R3": {
+      "passed": 3,
+      "runs": 3
+    },
+    "M1": {
+      "passed": 3,
+      "runs": 3
+    },
+    "M2": {
+      "passed": 3,
+      "runs": 3
+    }
+  }
+}

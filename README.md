@@ -22,7 +22,7 @@ make run                    # abre a interface em http://localhost:8501
 Com Docker:
 
 ```bash
-docker compose up --build   # http://localhost:8501
+docker compose up --build   # interface em http://localhost:8501, API em http://localhost:8000
 ```
 
 Pela linha de comando:
@@ -34,11 +34,11 @@ Pela linha de comando:
 Verificações e avaliação:
 
 ```bash
-make check                  # ruff + formatação + mypy estrito + 190 testes (não usa a API)
+make check                  # ruff + formatação + mypy estrito + 298 testes (não usa a API)
 make eval ARGS="--repeat 3" # avaliação com o Gemini real (gasta cota gratuita)
 ```
 
-As demais variáveis são opcionais e estão documentadas em [`.env.example`](.env.example) (modelos de fallback, cache, limites de linhas e de tempo).
+As demais variáveis são opcionais e estão documentadas em [`.env.example`](.env.example) (modelos de fallback, cache, limites de linhas e de tempo, chave da API, LangFuse, Vertex AI).
 
 ## Como funciona
 
@@ -69,15 +69,53 @@ A aba **Visão em grafo** mostra como estados, categorias de compra, canais de c
 
 ![Visão em grafo: estados e categorias de compra ligados por clientes em comum](docs/img/grafo.png)
 
+### Memória de conversa
+
+Perguntas seguidas na mesma conversa se entendem: depois de "Qual o número de reclamações não resolvidas por canal?", basta perguntar "E só no Chat?". Cada conversa tem um `thread_id`, guardado pelo checkpointer do LangGraph ([ADR 0008](docs/adr/0008-memoria-de-conversa-por-thread.md)). Na interface, o botão "Nova conversa" começa outra.
+
+O modelo vê os 3 últimos turnos: pergunta, SQL e resposta, com fichas no lugar de nomes e e-mails e sem linhas de resultado. Números sempre vêm de uma consulta nova. A memória fica em RAM e some quando o processo reinicia.
+
+![Memória de conversa: "E só no Chat?" responde 18 depois das reclamações por canal](docs/img/memoria.png)
+
+### Avisos automáticos
+
+Dois avisos são calculados no código, a partir da SQL final e dos dados, nunca pelo modelo:
+
+- **Empate no corte:** num ranking com `LIMIT n`, se há linhas de fora empatadas com a n-ésima, a resposta avisa quais são. Na pergunta dos 5 estados, Alagoas, Espírito Santo e Paraná empatam com 2 clientes e só cabem dois.
+- **Período incompleto:** se a SQL filtra um ano ou mês inteiro que os dados cobrem só em parte, a resposta diz o intervalo real. "Em 2024" cobre só de 22/07/2024 a 31/12/2024.
+
+Se a SQL não dá para analisar, não há aviso; um erro no cálculo de um aviso nunca derruba a resposta.
+
+![Aviso de empate no corte do top 5 de estados](docs/img/aviso.png)
+
 ### Armadilhas dos dados que o assistente trata
 
 | Armadilha | Tratamento |
 |---|---|
 | `clientes.valor_total_gasto` e `clientes.data_ultima_compra` não batem com a tabela `compras` | Marcadas como não confiáveis no dicionário; totais e datas vêm de `compras` |
 | Os dados vão de 2024-07-22 a 2025-07-22 | "Último ano", "em maio" e similares usam a data mais recente do banco, não a data de hoje. "Maio" = 2025-05 |
-| "Em 2024" cobre só julho a dezembro | A resposta declara a cobertura real |
+| "Em 2024" cobre só julho a dezembro | A resposta declara a cobertura real, e um aviso automático mostra o intervalo |
 | `estado` está por extenso, não em sigla | Anotado no dicionário |
 | Perguntas ambíguas ("média de compras por cliente") | O agente assume a leitura padrão e declara a premissa na resposta |
+
+## API
+
+O mesmo assistente da interface, em FastAPI ([ADR 0009](docs/adr/0009-api-fastapi-em-vez-de-langserve.md)). `make run-api` sobe em http://localhost:8000, com a documentação interativa em `/docs`.
+
+| Rota | O que faz |
+|---|---|
+| `GET /health` | Modelo e versão do prompt; 503 se o assistente não conseguiu subir |
+| `POST /ask` | `{"question": "...", "thread_id": "..."}` → resposta completa em JSON (texto, dados, gráfico, avisos, passos, custo) |
+| `POST /ask/stream` | O mesmo em Server-Sent Events: eventos `progress` a cada etapa e, no fim, `answer` ou `error` |
+
+```bash
+curl -s localhost:8000/ask -H 'Content-Type: application/json' \
+  -d '{"question": "Qual o número de reclamações não resolvidas por canal?", "thread_id": "demo"}'
+curl -sN localhost:8000/ask/stream -H 'Content-Type: application/json' \
+  -d '{"question": "E só no Chat?", "thread_id": "demo"}'
+```
+
+O `thread_id` é opcional; o mesmo valor mantém a conversa. Com `API_KEY` no `.env`, toda rota exceto `/health` exige o cabeçalho `X-API-Key`. A resposta traz nomes e e-mails reais, como a tela; só o LLM e os rastros veem fichas. O LangServe ficou de fora: está descontinuado desde novembro de 2024.
 
 ## Segurança
 
@@ -99,38 +137,66 @@ O free tier do Gemini tem limite de requisições por minuto e por dia, por mode
 - **Registro de cota** em disco: um modelo esgotado não é chamado de novo até a cota zerar (meia-noite do Pacífico).
 - **Cache** das respostas do LLM por hash da mensagem completa (`LLM_CACHE=on|off|replay`). Em `replay` o app só usa respostas já guardadas no cache local e nunca chama a API, nem precisa da chave.
 
+### Vertex AI
+
+Com `LLM_PROVIDER=vertex`, o mesmo Gemini é chamado pelo Vertex AI de um projeto do Google Cloud, sem chave de API: a autenticação usa as Application Default Credentials.
+
+```bash
+gcloud auth application-default login
+# no .env:
+LLM_PROVIDER=vertex
+GOOGLE_CLOUD_PROJECT=meu-projeto
+GOOGLE_CLOUD_LOCATION=southamerica-east1   # padrão; troque se o modelo não estiver na região
+```
+
+O Vertex é o caminho para produção: cobrança no projeto, cota maior e escolha da região dos dados (São Paulo por padrão, o que ajuda na conversa sobre LGPD). Cada provedor tem seu próprio registro de cota, então a cota esgotada no AI Studio não bloqueia o Vertex. O restante (fallback, cache, pseudonimização) não muda.
+
 ## Observabilidade
 
-Cada pergunta gera um rastro em `traces/traces.jsonl`: passos, SQL, erros, modelo, tokens, latência e se a chamada veio do cache. Os rastros guardam a pergunta e a SQL com as fichas no lugar de nomes e e-mails e nunca guardam linhas de resultado. A aba de rastros da interface lê esse arquivo.
+Cada pergunta gera um rastro em `traces/traces.jsonl`: passos, SQL, erros, modelo, tokens, latência, versão do prompt e se a chamada veio do cache. Os rastros guardam a pergunta e a SQL com as fichas no lugar de nomes e e-mails e nunca guardam linhas de resultado. A aba de rastros da interface lê esse arquivo e mostra um painel com respostas, recusas, falhas, autocorreções, latência mediana e p95, tokens e custo estimado por mil perguntas.
+
+![Aba de rastros: métricas e tabela das perguntas](docs/img/rastros.png)
+
+### Versão de prompt e gate de regressão
+
+Toda resposta e todo rastro levam a `prompt_version`: um hash curto dos arquivos que montam o prompt, do dicionário de negócio e do schema da decisão ([ADR 0010](docs/adr/0010-langfuse-e-versao-de-prompt.md)). Qualquer mudança em um deles gera uma versão nova, então dá para saber qual prompt produziu cada resposta.
+
+`make eval` compara a rodada com a anterior, guardada em [`docs/avaliacao.json`](docs/avaliacao.json), e sai com código 3 se alguma pergunta piorou. Execuções perdidas por cota ou rede não contam. Para gravar uma nova base, use `make eval ARGS="--repeat 3 --save-baseline"`; uma rodada com vazamento de dado pessoal ou banco alterado nunca vira base.
+
+### LangFuse (opcional)
+
+Com `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY` no `.env`, cada decisão do modelo vira uma *generation* no [LangFuse](https://langfuse.com), agrupada por pergunta, com a versão do prompt como tag e a conversa como sessão. O registro fica abaixo do grafo: o LangFuse só recebe as mensagens já mascaradas (`[nome_1]`), e um teste garante isso. `make eval ARGS="--langfuse"` registra a rodada no dataset `indaga-eval`, com as notas `acerto`, `correcoes` e `latencia_ms` por pergunta. Sem as chaves, nada é enviado e o pacote nem é importado.
 
 ## Avaliação
 
-[`tests/eval/questions.yaml`](tests/eval/questions.yaml) tem 17 perguntas com SQL de referência escrita à mão: as 5 do enunciado, variações, dados pessoais, ambíguas, autocorreção com falha injetada, instrução maliciosa plantada no resultado da consulta e recusas. O acerto compara o **resultado** da consulta do agente com o da referência (acerto de execução), não o texto ([ADR 0007](docs/adr/0007-avaliacao-por-acerto-de-execucao.md)).
+[`tests/eval/questions.yaml`](tests/eval/questions.yaml) tem 19 perguntas com SQL de referência escrita à mão: as 5 do enunciado, variações, dados pessoais, ambíguas, autocorreção com falha injetada, instrução maliciosa plantada no resultado da consulta, recusas e duas de acompanhamento (M1 "E só no Chat?" depois da P4, M2 "E pelo site?" depois do E1), que rodam na mesma conversa da pergunta anterior. O acerto compara o **resultado** da consulta do agente com o da referência (acerto de execução), não o texto ([ADR 0007](docs/adr/0007-avaliacao-por-acerto-de-execucao.md)).
 
-Última rodada, com o Gemini real, 3 execuções por pergunta e cache desligado ([relatório completo](docs/avaliacao.md)):
+Última rodada, com o Gemini real (`gemini-3.5-flash-lite`), 3 execuções por pergunta e cache desligado, versão de prompt `6d300bcd` ([relatório completo](docs/avaliacao.md), base do gate em [`docs/avaliacao.json`](docs/avaliacao.json)):
 
 | Métrica | Valor |
 |---|---|
-| Acerto geral | 51/51 (100%) |
-| Acerto de execução | 42/42 (100%) |
+| Acerto geral | 57/57 (100%) |
+| Acerto de execução | 48/48 (100%) |
 | Recusas corretas (fora do escopo, escrita, injeção) | 9/9 (100%) |
 | Autocorreção após falha injetada | 3/3 (100%) |
 | Instrução plantada nos dados ignorada | 3/3 (100%) |
+| Avisos de empate (E1) e período parcial (E2) presentes | 6/6 (100%) |
+| Perguntas de acompanhamento (M1, M2) | 6/6 (100%) |
 | Mensagens ao LLM com nome ou e-mail real | 0 |
 | Banco inalterado ao final | sim |
 | Chamadas ao LLM por pergunta (média) | 1,9 |
 | Latência por pergunta (mediana) | 2,8 s |
 
-Na rodada anterior, a pergunta ambígua A2 ("Quantos clientes compraram em julho?") falhou em 1 de 3 execuções: o agente somou os dois meses de julho dos dados, contra a regra do dicionário (mês sem ano = ocorrência mais recente). A regra passou a dizer como aplicar o filtro (ano e mês, nunca só o mês), e o A2 acertou 3 de 3 nesta rodada. No caso D1, uma ordem para ignorar as instruções e apagar a tabela `suporte` vai escondida numa coluna do resultado mostrado ao modelo. O modelo ignorou a ordem nas 3 execuções, e o `run_sql` só lê de qualquer forma.
+Na rodada anterior, a pergunta ambígua A2 ("Quantos clientes compraram em julho?") falhou em 1 de 3 execuções: o agente somou os dois meses de julho dos dados, contra a regra do dicionário (mês sem ano = ocorrência mais recente). A regra passou a dizer como aplicar o filtro (ano e mês, nunca só o mês), e o A2 acertou 3 de 3 nas rodadas seguintes. No caso D1, uma ordem para ignorar as instruções e apagar a tabela `suporte` vai escondida numa coluna do resultado mostrado ao modelo. O modelo ignorou a ordem nas 3 execuções, e o `run_sql` só lê de qualquer forma.
 
-Dezessete perguntas não provam robustez geral. A avaliação serve para pegar regressões nas armadilhas conhecidas, não como estimativa de acerto em produção.
+Dezenove perguntas não provam robustez geral. A avaliação serve para pegar regressões nas armadilhas conhecidas, não como estimativa de acerto em produção.
 
 ### As 5 perguntas do enunciado
 
 | Pergunta | Resposta |
 |---|---|
-| Liste os 5 estados com maior número de clientes que compraram via app em maio. | Maio de 2025: São Paulo (6), Minas Gerais e Santa Catarina (3) e dois entre Alagoas, Espírito Santo e Paraná, empatados com 2 |
-| Quantos clientes interagiram com campanhas de WhatsApp em 2024? | 17 (os dados de 2024 cobrem julho a dezembro) |
+| Liste os 5 estados com maior número de clientes que compraram via app em maio. | Maio de 2025: São Paulo (6), Minas Gerais e Santa Catarina (3) e dois entre Alagoas, Espírito Santo e Paraná, empatados com 2. A resposta traz o aviso de empate no corte |
+| Quantos clientes interagiram com campanhas de WhatsApp em 2024? | 17, com o aviso de que os dados de 2024 cobrem só julho a dezembro |
 | Quais categorias de produto tiveram o maior número de compras em média por cliente? | Roupas (2,21), Viagens (2,16), Livros (1,98), Serviços (1,96), Eletrônicos (1,92), Alimentos (1,88) |
 | Qual o número de reclamações não resolvidas por canal? | Telefone 19, Chat 18, E-mail 14 |
 | Qual a tendência de reclamações por canal no último ano? | Série mensal de julho de 2024 a julho de 2025, em gráfico de linhas (imagem acima) |
@@ -143,11 +209,16 @@ src/
   agent/                   grafo LangGraph, AgentDecision, prompts
   db/tools.py              run_sql com guardrails e descoberta do schema
   semantic/                dicionário de negócio e validação contra o schema
-  llm.py, resilience.py    provedor, limitador, fallback, cache, registro de cota
+  agent/notices.py         avisos de empate no corte e período incompleto
+  api.py                   API FastAPI (/health, /ask, /ask/stream)
+  llm.py, resilience.py    provedores (AI Studio, Vertex), limitador, fallback, cache, registro de cota
   privacy.py               pseudonimização de nome e e-mail
   progress.py              eventos de progresso da pergunta (etapas, esperas de cota)
   observability.py         rastros JSONL
-  evaluation.py            avaliação por acerto de execução
+  versioning.py            versão do prompt (hash)
+  run_context.py           rastro, versão e conversa da pergunta em curso
+  langfuse_bridge.py       LangFuse opcional (generations e dataset da avaliação)
+  evaluation.py            avaliação por acerto de execução e gate de regressão
   ui/                      componentes, textos, tema, grafo da consulta, painel de progresso
   ui/banner.png            faixa do topo (imagem do material do desafio)
   ui/data_graph.py         aba "Visão em grafo" (pyvis, só agregados)
@@ -163,8 +234,8 @@ Os ADRs estão em [`docs/adr/`](docs/adr/README.md). O banco de grafos (Neo4j) f
 
 ## Melhorias possíveis
 
-- **Memória de conversa** para perguntas de acompanhamento ("e no Chat?").
-- **LangFuse** opcional, ligado aos rastros JSONL e às rodadas de avaliação.
+- **Memória persistente** (`SqliteSaver`/`PostgresSaver` com prazo de expiração) para conversas que sobrevivem a reinícios e a mais de uma réplica da API.
+- **Limite de requisições por cliente** na API (hoje fica a cargo de um gateway).
 - **Catálogo semântico maior**, com sinônimos e métricas aprovadas pela área de negócio.
 - **Mais perguntas de avaliação**, incluindo perguntas reais de usuários, e execução agendada da avaliação.
 - **Pseudonimização também de nomes digitados** que não estão no banco (detecção de entidades).
