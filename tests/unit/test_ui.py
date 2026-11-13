@@ -8,10 +8,10 @@ from typing import Any
 import pytest
 
 from src.agent.models import AgentResponse, ChartSpec
-from src.config import Settings
+from src.config import Price, Settings
 from src.db.tools import QueryResult, discover_schema
 from src.semantic.dictionary import SemanticDictionary, load_dictionary
-from src.ui import view
+from src.ui import texts, view
 
 
 def result(columns: list[str], rows: list[list[Any]], *, truncated: bool = False, sql: str = "SELECT 1") -> QueryResult:
@@ -197,3 +197,68 @@ def test_display_records_humanizes_headers_but_not_on_collision() -> None:
     assert view.display_records(STATES)[0] == {"Estado": "São Paulo", "Clientes": 6}
     clash = result(["mes", "Mes"], [["2025-01", "jan"]])
     assert view.display_records(clash)[0] == {"mes": "2025-01", "Mes": "jan"}
+
+
+# --- B: trace metrics panel
+
+
+def _trace(status: str, latency_ms: float, *, calls: int = 2, hits: int = 0, corrections: int = 0) -> dict[str, Any]:
+    return {
+        "status": status,
+        "latency_ms": latency_ms,
+        "llm_calls": calls,
+        "cache_hits": hits,
+        "corrections": corrections,
+        "usage": {"input_tokens": 3000, "output_tokens": 200},
+    }
+
+
+SAMPLE_TRACES = [
+    _trace("answered", 1000, hits=2),
+    _trace("answered", 2000, corrections=1, calls=3),
+    _trace("refused", 3000, calls=1),
+    _trace("failed", 10000, calls=2),
+]
+
+
+def test_trace_summary_rates_and_percentiles() -> None:
+    rows = dict(view.trace_summary(SAMPLE_TRACES, None))
+    assert list(rows) == [
+        texts.METRIC_QUESTIONS,
+        texts.METRIC_ANSWERED,
+        texts.METRIC_REFUSED,
+        texts.METRIC_FAILED,
+        texts.METRIC_CORRECTED,
+        texts.METRIC_CACHED,
+        texts.METRIC_P50,
+        texts.METRIC_P95,
+        texts.METRIC_TOKENS,
+    ]
+    assert rows[texts.METRIC_QUESTIONS] == "4"
+    assert rows[texts.METRIC_ANSWERED] == "50%"
+    assert rows[texts.METRIC_REFUSED] == "25%"
+    assert rows[texts.METRIC_FAILED] == "25%"
+    assert rows[texts.METRIC_CORRECTED] == "25%"
+    assert rows[texts.METRIC_CACHED] == "25%"  # 2 of 8 LLM decisions
+    assert rows[texts.METRIC_P50] == "2,5 s"
+    assert rows[texts.METRIC_P95] == "8,9 s"
+    assert rows[texts.METRIC_TOKENS] == "3.200"
+
+
+def test_trace_summary_empty_is_empty_list() -> None:
+    assert view.trace_summary([], None) == []
+
+
+def test_trace_summary_single_trace_and_old_records() -> None:
+    rows = dict(view.trace_summary([{"status": "answered", "latency_ms": 1234}], None))
+    assert rows[texts.METRIC_P50] == rows[texts.METRIC_P95] == "1,2 s"
+    assert rows[texts.METRIC_CACHED] == "—"  # no LLM calls recorded
+    assert rows[texts.METRIC_TOKENS] == "0"
+
+
+def test_cost_row_only_with_price() -> None:
+    assert texts.METRIC_COST not in dict(view.trace_summary(SAMPLE_TRACES, None))
+    rows = dict(view.trace_summary(SAMPLE_TRACES, Price(0.30, 2.50)))
+    assert list(rows)[-1] == texts.METRIC_COST
+    # 3000 * 0,30 + 200 * 2,50 = 1400 US$ per million questions → US$ 1,40 per thousand
+    assert rows[texts.METRIC_COST] == "1,40"

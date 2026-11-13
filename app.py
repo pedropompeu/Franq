@@ -15,12 +15,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import streamlit as st
 
 from src.agent.graph import Assistant
 from src.agent.models import AgentResponse, Step
-from src.config import Settings, load_env_file
+from src.config import Price, Settings, load_env_file
 from src.db.tools import QueryResult, discover_schema
 from src.llm import LLMError, get_llm
 from src.observability import Tracer
@@ -311,12 +312,25 @@ def render_graph_tab(rt: Runtime) -> None:
         st.dataframe(data_graph.strongest(graph), hide_index=True, width="stretch")
 
 
+METRICS_PER_ROW = 5
+
+
+def render_trace_metrics(traces: list[dict[str, Any]], price: Price | None) -> None:
+    summary = view.trace_summary(traces, price)
+    st.caption(texts.TRACES_METRICS_CAPTION.format(n=len(traces)))
+    for start in range(0, len(summary), METRICS_PER_ROW):
+        row = summary[start : start + METRICS_PER_ROW]
+        for column, (label, value) in zip(st.columns(METRICS_PER_ROW), row, strict=False):
+            column.metric(label, value, help=texts.METRIC_HELP.get(label))
+
+
 def render_traces_tab(rt: Runtime) -> None:
     st.caption(texts.TRACES_CAPTION.format(path=rt.settings.trace_path.name))
     traces = rt.tracer.tail(30)
     if not traces:
         st.caption(texts.TRACES_EMPTY)
         return
+    render_trace_metrics(traces, rt.settings.price)
     st.dataframe(view.trace_table(traces), hide_index=True, width="stretch")
     with st.expander("Último registro completo (JSON)"):
         st.json(traces[-1])

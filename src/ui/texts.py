@@ -125,3 +125,30 @@ TRACES_EMPTY: Final = "Nenhuma pergunta registrada ainda."
 TRACES_CAPTION: Final = (
     "Um registro por pergunta em `{path}`: passos, SQL, erros, tokens e latência. Sem linhas de resultado."
 )
+
+# --- B: painel de métricas dos rastros
+METRIC_QUESTIONS: Final = "Perguntas"
+METRIC_ANSWERED: Final = "Respondidas"
+METRIC_REFUSED: Final = "Recusadas"
+METRIC_FAILED: Final = "Falharam"
+METRIC_CORRECTED: Final = "Autocorrigidas"
+METRIC_CACHED: Final = "Do cache"
+METRIC_P50: Final = "Latência mediana"
+METRIC_P95: Final = "Latência p95"
+METRIC_TOKENS: Final = "Tokens médios"
+METRIC_COST: Final = "US$ por mil"
+METRIC_HELP: Final = {
+    METRIC_ANSWERED: "Perguntas com resposta a partir de uma consulta ao banco.",
+    METRIC_REFUSED: "Pedidos fora do escopo, de escrita ou com injeção de instruções, recusados pelo agente.",
+    METRIC_FAILED: "Perguntas que terminaram sem resposta (limite de passos, de correções ou falha do modelo).",
+    METRIC_CORRECTED: "Perguntas em que o banco recusou uma consulta e o agente a reescreveu.",
+    METRIC_CACHED: "Decisões do modelo servidas pelo cache local, sem chamar o Gemini.",
+    METRIC_P50: "Metade das perguntas respondeu em até este tempo.",
+    METRIC_P95: "95% das perguntas responderam em até este tempo.",
+    METRIC_TOKENS: "Média de tokens de entrada e saída por pergunta.",
+    METRIC_COST: (
+        "Custo estimado de mil perguntas como estas, pelo preço em LLM_PRICE_USD_PER_MTOK. Conta todos os tokens, "
+        "inclusive os de decisões servidas pelo cache."
+    ),
+}
+TRACES_METRICS_CAPTION: Final = "Métricas das últimas {n} perguntas registradas."

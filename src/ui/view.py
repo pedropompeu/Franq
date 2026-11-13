@@ -12,12 +12,14 @@ import csv
 import io
 import math
 import re
+import statistics
 from collections.abc import Iterable, Sequence
 from typing import Any, cast
 
 import altair as alt
 
 from src.agent.models import AgentResponse, ChartSpec
+from src.config import Price
 from src.db.tools import QueryResult, SchemaInfo
 from src.semantic.dictionary import SemanticDictionary
 from src.ui import texts
@@ -318,3 +320,55 @@ def br_date(iso: str) -> str:
     """``2025-11-30`` → ``30/11/2025``; anything else is returned unchanged."""
     match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", iso[:10])
     return f"{match[3]}/{match[2]}/{match[1]}" if match else iso
+
+
+# --- B: trace metrics panel
+
+
+def _share(part: int, whole: int) -> str:
+    return f"{format_number(round(100 * part / whole))}%" if whole else "—"
+
+
+def _seconds_1(ms: float) -> str:
+    return f"{ms / 1000:.1f} s".replace(".", ",")
+
+
+def _percentile(values: Sequence[float], q: int) -> float:
+    """``q``-th percentile with linear interpolation (``statistics.quantiles``, inclusive)."""
+    if len(values) == 1:
+        return values[0]
+    return statistics.quantiles(values, n=100, method="inclusive")[q - 1]
+
+
+def trace_summary(traces: Sequence[dict[str, Any]], price: Price | None) -> list[tuple[str, str]]:
+    """Metric panel of the traces tab: (label, pt-BR value) pairs, in display order.
+
+    Reads only what ``observability.trace_record`` writes; missing fields (older records) count as 0.
+    The cost is in US$ per thousand questions and counts every token, including decisions served
+    from the cache, so it estimates what the questions cost without the cache.
+    """
+    if not traces:
+        return []
+    n = len(traces)
+    status = [str(t.get("status", "")) for t in traces]
+    calls = sum(int(t.get("llm_calls") or 0) for t in traces)
+    hits = sum(int(t.get("cache_hits") or 0) for t in traces)
+    latencies = sorted(float(t.get("latency_ms") or 0) for t in traces)
+    usage = [t.get("usage") or {} for t in traces]
+    tokens_in = sum(int(u.get("input_tokens") or 0) for u in usage)
+    tokens_out = sum(int(u.get("output_tokens") or 0) for u in usage)
+    rows = [
+        (texts.METRIC_QUESTIONS, format_number(n)),
+        (texts.METRIC_ANSWERED, _share(status.count("answered"), n)),
+        (texts.METRIC_REFUSED, _share(status.count("refused"), n)),
+        (texts.METRIC_FAILED, _share(status.count("failed"), n)),
+        (texts.METRIC_CORRECTED, _share(sum(1 for t in traces if (t.get("corrections") or 0) > 0), n)),
+        (texts.METRIC_CACHED, _share(hits, calls)),
+        (texts.METRIC_P50, _seconds_1(_percentile(latencies, 50))),
+        (texts.METRIC_P95, _seconds_1(_percentile(latencies, 95))),
+        (texts.METRIC_TOKENS, format_number(round((tokens_in + tokens_out) / n))),
+    ]
+    if price is not None:
+        per_thousand = (tokens_in * price.input_per_mtok + tokens_out * price.output_per_mtok) / 1_000 / n
+        rows.append((texts.METRIC_COST, f"{per_thousand:.2f}".replace(".", ",")))
+    return rows
