@@ -25,3 +25,14 @@ def db_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
     before = file_sha256(target)
     yield target
     assert file_sha256(target) == before, "the database file was modified during the tests"
+
+
+@pytest.fixture(autouse=True)
+def _no_langfuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never reach LangFuse, even when a developer's .env has the keys.
+
+    Empty values count as "set" for ``load_env_file`` (so the .env cannot fill them) and as
+    missing for the LangFuse bridge.
+    """
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "")

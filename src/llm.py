@@ -176,6 +176,8 @@ def get_llm() -> StructuredLLM:
     - ``LLM_CACHE``: ``on`` (default), ``off`` or ``replay`` (cache only, never calls the API).
     - ``LLM_PROVIDER``: ``gemini`` (default, AI Studio, ``GOOGLE_API_KEY``) or ``vertex``
       (``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_LOCATION``, Application Default Credentials).
+    - ``LANGFUSE_PUBLIC_KEY`` + ``LANGFUSE_SECRET_KEY`` (optional): wraps the chain in
+      :class:`src.langfuse_bridge.TracedLLM`, which records the already masked messages.
     """
     from src.resilience import CachedLLM, FallbackLLM, OfflineLLM, QuotaStore, ResilientLLM
 
@@ -206,4 +208,8 @@ def get_llm() -> StructuredLLM:
             continue
         llm: StructuredLLM = ResilientLLM(GeminiLLM(model, api_key, vertex=vertex), rpm=rpm, quota=quota)
         chain.append(CachedLLM(llm, cache_dir) if cache_mode == "on" else llm)
-    return chain[0] if len(chain) == 1 else FallbackLLM(chain)
+    head = chain[0] if len(chain) == 1 else FallbackLLM(chain)
+    from src import langfuse_bridge  # lazy: imports langfuse only when its keys are set
+
+    sink = langfuse_bridge.langfuse_sink_from_env()
+    return langfuse_bridge.TracedLLM(head, sink) if sink is not None else head

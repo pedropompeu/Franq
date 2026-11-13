@@ -11,3 +11,4 @@ altair==6.3.0  # specs de gráfico (usado diretamente em src/ui/view.py)
 pyvis==0.3.2  # aba "Visão em grafo" (vis-network com JS embutido, sem CDN)
 fastapi==0.162.7  # API HTTP (src/api.py), mesma lógica do app
 uvicorn==0.54.0  # servidor da API: uvicorn src.api:app
+langfuse==5.2.0  # opcional: só é importado com LANGFUSE_PUBLIC_KEY/SECRET_KEY definidas (src/langfuse_bridge.py)

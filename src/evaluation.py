@@ -52,6 +52,7 @@ from pydantic import BaseModel, Field
 from src.agent.graph import Assistant
 from src.agent.models import AgentResponse, NoticeKind
 from src.config import PROJECT_ROOT, Settings, load_env_file
+from src.langfuse_bridge import DatasetSink, langfuse_dataset_sink
 from src.llm import LLMReply, StructuredLLM, get_llm
 from src.observability import Tracer
 from src.privacy import TOKEN, Pseudonymizer, load_pseudonymizer
@@ -280,6 +281,7 @@ class CaseRun:
     leaks: int
     sql: str  # masked: tokens instead of personal values
     model: str
+    trace_id: str = ""
 
     @property
     def passed(self) -> bool:
@@ -349,6 +351,7 @@ def run_case(
         leaks=guard.leaks,
         sql=privacy.mask(final_sql),
         model=response.model,
+        trace_id=response.trace_id,
     )
 
 
@@ -518,6 +521,14 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _send(sink: DatasetSink, run: CaseRun, run_name: str) -> None:
+    """An observability failure is reported but never stops the evaluation."""
+    try:
+        sink.record_case(run, run_name=run_name)
+    except Exception as err:
+        print(f"[aviso] LangFuse: {run.case.id} não registrado ({type(err).__name__})", file=sys.stderr)
+
+
 def run_evaluation(
     cases: Sequence[EvalCase],
     assistant_factory: Callable[[StructuredLLM], Assistant],
@@ -528,6 +539,7 @@ def run_evaluation(
     repeat: int = 1,
     cache_mode: str = "off",
     progress: Callable[[CaseRun], None] | None = None,
+    dataset_sink: DatasetSink | None = None,
 ) -> EvalReport:
     started, clock = datetime.now(), datetime.now().timestamp()
     before = file_sha256(settings.db_path)
@@ -535,6 +547,7 @@ def run_evaluation(
     injector = FaultInjector(guard)
     assistant = assistant_factory(injector)
     version = assistant.prompt_version
+    run_name = f"{version}-{started:%Y%m%d-%H%M%S}"
     references = {
         c.id: [run_reference(settings.db_path, privacy.unmask_sql(sql)) for sql in c.reference] for c in cases
     }
@@ -543,6 +556,8 @@ def run_evaluation(
         for case in cases:
             run = run_case(case, assistant, guard, injector, references[case.id], privacy)
             runs.append(run)
+            if dataset_sink is not None:
+                _send(dataset_sink, run, run_name)
             if progress is not None:
                 progress(run)
     return EvalReport(
@@ -572,6 +587,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-baseline", action="store_true", help="não comparar com a rodada anterior")
     parser.add_argument("--save-baseline", action="store_true", help="gravar esta rodada como a nova base")
+    parser.add_argument(
+        "--langfuse", action="store_true", help="registrar a rodada como execução de dataset no LangFuse"
+    )
     args = parser.parse_args(argv)
 
     load_env_file()
@@ -592,8 +610,23 @@ def main(argv: list[str] | None = None) -> int:
         detail = "" if run.passed else f"  ({', '.join(run.failed_checks)})"
         print(f"[{mark}] {run.case.id:<3} {run.status:<9} {_fmt_s(run.latency_ms):>5} s{detail}", flush=True)
 
+    dataset_sink: DatasetSink | None = None
+    if args.langfuse:
+        try:
+            dataset_sink = langfuse_dataset_sink()
+        except RuntimeError as err:
+            print(str(err), file=sys.stderr)
+            return 2
     report = run_evaluation(
-        cases, factory, get_llm(), settings, privacy, repeat=args.repeat, cache_mode=args.cache, progress=progress
+        cases,
+        factory,
+        get_llm(),
+        settings,
+        privacy,
+        repeat=args.repeat,
+        cache_mode=args.cache,
+        progress=progress,
+        dataset_sink=dataset_sink,
     )
     baseline: dict[str, Any] | None = None
     if not args.no_baseline and args.baseline.exists():
