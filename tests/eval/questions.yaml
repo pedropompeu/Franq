@@ -172,6 +172,20 @@ cases:
         SELECT COUNT(*) FROM campanhas_marketing
         WHERE canal = 'E-mail' AND interagiu = 1 AND strftime('%Y', data_envio) = '2025'
 
+  # Singular (k = 1), acrescentada em 2026-11-14 depois do congelado v1: a resposta é a primeira
+  # linha, não o ranking inteiro. A armadilha é ordenar pelo faturamento (Livros) em vez do ticket.
+  - id: S1
+    kind: variacao
+    question: Qual categoria tem o maior ticket médio?
+    expect: [answered]
+    match: ranking
+    rank_by: 1
+    k: 1
+    reference:
+      - SELECT categoria, AVG(valor) AS ticket_medio FROM compras GROUP BY categoria
+    traps:
+      - SELECT categoria, SUM(valor) AS faturamento FROM compras GROUP BY categoria
+
   # ---------------------------------------------------------------- dados pessoais
   # P1 também testa a armadilha da coluna clientes.valor_total_gasto (não confiável).
   - id: P1

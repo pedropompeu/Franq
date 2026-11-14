@@ -1,7 +1,7 @@
 {
-  "prompt_version": "6d300bcd",
-  "models": "gemini-3.5-flash-lite",
-  "started": "2026-11-13T20:44:47",
+  "prompt_version": "65a7b1ea",
+  "models": "gemini-3.5-flash-lite:15",
+  "started": "2026-11-14T10:27:22",
   "cases": {
     "E1": {
       "passed": 3,
@@ -32,6 +32,14 @@
       "runs": 3
     },
     "V3": {
+      "passed": 3,
+      "runs": 3
+    },
+    "V4": {
+      "passed": 3,
+      "runs": 3
+    },
+    "S1": {
       "passed": 3,
       "runs": 3
     },
