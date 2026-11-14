@@ -3,6 +3,41 @@ name = "assistente-dados"
 version = "0.1.0"
 description = "Assistente Virtual de Dados: perguntas de negócio em linguagem natural sobre SQLite."
 requires-python = ">=3.12"
+# Única fonte das dependências diretas. requirements.txt e requirements-dev.txt são o lock gerado
+# a partir daqui (make lock, pip-tools), com as transitivas fixadas: não edite os .txt à mão.
+dependencies = [
+    "pydantic==2.14.3",
+    "PyYAML==6.0.3",
+    "sqlglot==30.31.0",
+    "langgraph==1.2.21",
+    "langchain-core==1.8.0",
+    "langchain-google-genai==4.5.0",  # traz o google-genai, que o código não importa direto
+    "streamlit==1.67.0",
+    "altair==6.3.0",  # specs de gráfico (src/ui/view.py)
+    "pyvis==0.3.2",  # aba "Visão em grafo" (vis-network com JS embutido, sem CDN)
+    "fastapi==0.162.7",  # API HTTP (src/api.py)
+    "uvicorn==0.54.0",  # servidor da API
+]
+
+[project.optional-dependencies]
+# Só é importado com LANGFUSE_PUBLIC_KEY/SECRET_KEY definidas (src/langfuse_bridge.py).
+langfuse = ["langfuse==5.2.0"]
+dev = [
+    "mypy==2.4.1",
+    "pytest==9.2.0",
+    "ruff==0.17.5",
+    "types-PyYAML==6.0.12.20261111",
+    "pip-tools==7.6.2",
+]
+
+# O projeto não é instalado como pacote (roda da raiz, pythonpath = "."); isto só permite ao
+# pip-tools ler as dependências acima.
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
