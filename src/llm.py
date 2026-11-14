@@ -6,6 +6,7 @@ Quota handling (cache, rate limiting, retry, fallback across models) lives in
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -214,8 +215,13 @@ def get_llm() -> StructuredLLM:
     elif cache_mode != "replay" and not api_key:
         raise LLMError("GOOGLE_API_KEY não definida. Copie .env.example para .env e preencha a chave.")
 
-    # one quota file per provider: an exhausted AI Studio free tier says nothing about a billed Vertex project
-    quota = QuotaStore(cache_dir / ("quota.json" if provider == "gemini" else f"quota-{provider}.json"))
+    # one quota file per provider and per AI Studio key: an exhausted key says nothing about another key,
+    # nor about a billed Vertex project. The name carries a short hash, never the key itself.
+    if provider == "gemini":
+        quota_file = f"quota-{hashlib.sha256(api_key.encode()).hexdigest()[:12]}.json"
+    else:
+        quota_file = f"quota-{provider}.json"
+    quota = QuotaStore(cache_dir / quota_file)
     chain: list[StructuredLLM] = []
     for model, rpm in specs:
         if cache_mode == "replay":

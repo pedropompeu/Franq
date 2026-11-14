@@ -94,3 +94,25 @@ def test_vertex_ignores_ai_studio_quota_mark(
     assert isinstance(llm, ResilientLLM)
     assert llm.quota is not None
     assert llm.quota.exhausted_until("gemini-x") is None  # billed project: its own quota
+
+
+def test_ai_studio_quota_mark_is_per_api_key(
+    monkeypatch: pytest.MonkeyPatch, fake_chat: list[dict[str, Any]], tmp_path: Path
+) -> None:
+    from src.resilience import ResilientLLM
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("LLM_CACHE", "off")
+    monkeypatch.setenv("LLM_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("GEMINI_MODELS", "gemini-x:15")
+
+    def quota_for(key: str) -> Any:
+        monkeypatch.setenv("GOOGLE_API_KEY", key)
+        llm = get_llm()
+        assert isinstance(llm, ResilientLLM) and llm.quota is not None
+        return llm.quota
+
+    quota_for("chave-a").mark_exhausted("gemini-x")  # the first key ran out
+    assert quota_for("chave-b").exhausted_until("gemini-x") is None  # another key: its own quota
+    assert quota_for("chave-a").exhausted_until("gemini-x") is not None
+    assert all("chave" not in p.name for p in tmp_path.iterdir())  # the file name never carries the key
