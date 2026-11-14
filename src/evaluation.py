@@ -71,6 +71,7 @@ from src.privacy import TOKEN, Pseudonymizer, load_pseudonymizer
 from src.semantic.dictionary import load_dictionary
 
 QUESTIONS_PATH = PROJECT_ROOT / "tests" / "eval" / "questions.yaml"
+PARAPHRASES_PATH = PROJECT_ROOT / "tests" / "eval" / "paraphrases.yaml"  # frozen, never used for tuning
 REPORT_PATH = PROJECT_ROOT / "docs" / "avaliacao.md"
 BASELINE_PATH = PROJECT_ROOT / "docs" / "avaliacao.json"
 EVAL_TRACE_PATH = PROJECT_ROOT / "traces" / "eval.jsonl"
@@ -90,6 +91,7 @@ KIND_LABEL = {
     "autocorrecao": "Autocorreção (falha injetada)",
     "injecao_dados": "Injeção nos dados",
     "acompanhamento": "Acompanhamento",
+    "inedita": "Inédita",
 }
 CHECK_LABEL = {
     "status": "status",
@@ -549,6 +551,42 @@ def drop_p_value(before_passed: int, before_runs: int, passed: int, runs: int) -
     return binomial_cdf(passed, runs, (before_passed + 1) / (before_runs + 2))
 
 
+Z95 = 1.959964  # two-sided 95% normal quantile
+
+
+def wilson(successes: int, n: int, z: float = Z95) -> tuple[float, float]:
+    """Wilson score interval for a proportion: honest at small n and at 0% or 100%.
+
+    With 20 out of 20 the interval is about 84% to 100%, not 100% to 100%.
+    """
+    if n == 0:
+        return 0.0, 1.0
+    rate = successes / n
+    denominator = 1 + z * z / n
+    center = (rate + z * z / (2 * n)) / denominator
+    half = z * math.sqrt(rate * (1 - rate) / n + z * z / (4 * n * n)) / denominator
+    return max(0.0, center - half), min(1.0, center + half)
+
+
+def stable_cases(report: EvalReport) -> tuple[int, int]:
+    """(questions right in every run that reached the model, questions with such a run).
+
+    The unit is the question, not the run: repeating a question gives correlated runs, so three
+    runs of 20 questions are not 60 independent trials (feedback 4.2).
+    """
+    counts = _model_counts(report).values()
+    return sum(passed == runs for passed, runs in counts), len(counts)
+
+
+def _wilson_row(report: EvalReport) -> str:
+    right, n = stable_cases(report)
+    low, high = wilson(right, n)
+    return (
+        f"| Perguntas certas em todas as execuções (IC 95% de Wilson, n = perguntas) | "
+        f"{_pct(right, n)} · IC {low * 100:.0f}% a {high * 100:.0f}% |"
+    )
+
+
 def reached_model(report: EvalReport) -> tuple[int, int]:
     """(runs that reached the model, all runs): quota and network losses are left out."""
     return sum(1 for r in report.runs if r.checks.get("llm", True)), len(report.runs)
@@ -696,6 +734,7 @@ def render_report(
     if llm_errors:
         lines.append(f"| Execuções com erro do LLM (cota ou rede) | {llm_errors} |")
     lines.append(f"| Execuções que chegaram ao modelo | {_pct(reached, total)} |")
+    lines.append(_wilson_row(report))
     lines += [
         "",
         "## Por pergunta",

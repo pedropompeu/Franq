@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from src.agent.models import AgentDecision, AgentResponse, Notice, Step
 from src.config import Settings
 from src.db.tools import QueryResult
 from src.evaluation import (
+    PARAPHRASES_PATH,
     PLANTED_COLUMN,
     PLANTED_MARKER,
     QUESTIONS_PATH,
@@ -33,7 +35,9 @@ from src.evaluation import (
     result_matches,
     run_evaluation,
     run_reference,
+    stable_cases,
     states_value,
+    wilson,
     write_baseline,
 )
 from src.llm import StructuredLLM
@@ -615,3 +619,54 @@ def test_followup_cases_are_labelled() -> None:
     assert {c.id for c in followups} == {"M1", "M2"}
     assert all(c.context for c in followups)
     assert evaluation.KIND_LABEL["acompanhamento"] == "Acompanhamento"
+
+
+# ---------------------------------------------------------------- frozen set and Wilson (feedback 4.2)
+
+# Changing paraphrases.yaml breaks this test on purpose: the set is frozen (see its header).
+PARAPHRASES_SHA256 = "2edd50e391159a2674799aaf05513e3b84d8eeb26a3d8d5fb9b45805fe48ab68"
+
+
+def test_frozen_set_is_unchanged() -> None:
+    assert hashlib.sha256(PARAPHRASES_PATH.read_bytes()).hexdigest() == PARAPHRASES_SHA256
+
+
+def test_frozen_set_is_valid_and_apart_from_the_tuning_set(db_path: Path) -> None:
+    frozen, tuning = load_cases(PARAPHRASES_PATH), load_cases()
+    assert len(frozen) >= 30 and len({c.id for c in frozen}) == len(frozen)
+    assert not {c.id for c in frozen} & {c.id for c in tuning}
+    normalized = {" ".join(c.question.lower().split()) for c in tuning}
+    assert not [c.id for c in frozen if " ".join(c.question.lower().split()) in normalized]
+    assert sum(c.kind == "inedita" for c in frozen) >= 10
+    assert all(c.assumption_terms for c in frozen if c.assumption)
+    for c in frozen:
+        references = [run_reference(db_path, sql) for sql in c.reference]
+        assert all(rows for _, rows in references), f"{c.id}: reference returned no rows"
+        for trap in c.traps:
+            wrong = run_reference(db_path, trap)
+            assert not any(result_matches(wrong, ref, c) for ref in references), f"{c.id}: trap matches"
+
+
+def test_frozen_set_has_no_personal_data(db_path: Path) -> None:
+    privacy = load_pseudonymizer(db_path, load_dictionary(DICTIONARY).pii_columns())
+    text = PARAPHRASES_PATH.read_text(encoding="utf-8")
+    assert privacy.mask(text) == text
+
+
+def test_wilson_interval() -> None:
+    low, high = wilson(20, 20)
+    assert low == pytest.approx(0.839, abs=1e-3) and high == 1.0
+    low, high = wilson(0, 10)
+    assert low == 0.0 and high == pytest.approx(0.278, abs=1e-3)
+    low, high = wilson(15, 30)
+    assert low == pytest.approx(0.332, abs=1e-3) and high == pytest.approx(0.668, abs=1e-3)
+    assert wilson(0, 0) == (0.0, 1.0)
+
+
+def test_wilson_counts_questions_not_runs() -> None:
+    """Three runs of a question are one trial: a question is right only when every run is."""
+    report = _report(("E1", True), ("E1", True), ("E1", True), ("E2", True), ("E2", False), ("E2", True), repeat=3)
+    assert stable_cases(report) == (1, 2)
+    text = render_report(report)
+    row = "| Perguntas certas em todas as execuções (IC 95% de Wilson, n = perguntas) | 1/2 (50%) · IC 9% a 91% |"
+    assert row in text

@@ -1,6 +1,6 @@
 # ADR 0007 — Avaliação por acerto de execução contra SQL de referência
 
-- **Status:** aceito (2026-11-12), comparador revisto em 2026-11-14
+- **Status:** aceito (2026-11-12), comparador revisto e conjunto congelado criado em 2026-11-14
 
 ## Contexto
 
@@ -24,6 +24,8 @@ Comparar o texto da SQL ou da resposta é frágil: há muitas consultas certas p
 
 `--repeat` mede a variância entre execuções.
 
+O `questions.yaml` é o **conjunto de ajuste**: o prompt e o dicionário mudaram olhando para ele. A medida fora da amostra é o **conjunto congelado** `tests/eval/paraphrases.yaml` (33 perguntas: as 20 com outra redação e 13 inéditas), escrito antes de rodar no modelo e travado por um teste com o SHA-256 do arquivo. Uma falha nele se corrige no prompt ou no código e se mede de novo no mesmo arquivo; uma referência errada vira um arquivo novo, e o antigo fica. Os relatórios trazem o intervalo de Wilson (95%) com n = perguntas, não execuções, porque as repetições de uma pergunta são correlacionadas.
+
 ## Alternativas descartadas
 
 - **LLM como juiz**: gasta cota e não é verificável.
@@ -32,7 +34,7 @@ Comparar o texto da SQL ou da resposta é frágil: há muitas consultas certas p
 ## Consequências
 
 - `make eval ARGS="--repeat 3"` gera `docs/avaliacao.md` e sai com código 1 se houver vazamento ou o banco mudar.
-- Gasta cota real (~90 chamadas para 3 repetições).
+- Gasta cota real (~90 chamadas para 3 repetições; ~150 a mais para o conjunto congelado).
 
 ## Histórico
 
