@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,16 +81,50 @@ class Pseudonymizer:
     def mask_rows(self, rows: Iterable[Sequence[object]]) -> list[list[object]]:
         return [[self.mask_cell(v) for v in row] for row in rows]
 
-    def unmask(self, text: str) -> str:
+    def unmask(self, text: str, *, allowed: Collection[str] | None = None) -> str:
+        """Tokens back to real values; with ``allowed``, only those (the rest stay as tokens)."""
         if not self.active or not text:
             return text
-        return TOKEN.sub(lambda m: self.to_value.get(m.group(0), m.group(0)), text)
+
+        def real(m: re.Match[str]) -> str:
+            token = m.group(0)
+            if allowed is not None and token not in allowed:
+                return token
+            return self.to_value.get(token, token)
+
+        return TOKEN.sub(real, text)
+
+    def tokens_in(self, text: str) -> set[str]:
+        return {m.group(0) for m in TOKEN.finditer(text)} if text else set()
 
     def unmask_sql(self, sql: str) -> str:
         """Tokens sit inside SQL string literals, so a real value's quotes are doubled."""
         if not self.active or not sql:
             return sql
         return TOKEN.sub(lambda m: self.to_value.get(m.group(0), m.group(0)).replace("'", "''"), sql)
+
+
+# Markdown or HTML that makes the reader's browser fetch a URL: a model steered by injected text could
+# smuggle real values out in it (feedback 2026-11-14, 2.1). Data answers never need any of it.
+_IMAGE = re.compile(r"!\[[^\]]*\](?:\([^)]*\)|\[[^\]]*\])")
+_LINK_DEFINITION = re.compile(r"^[ \t]*\[[^\]]+\]:[ \t]*\S+.*$", re.MULTILINE)
+_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+_HTML_TAG = re.compile(r"<\s*/?\s*(?:img|a|iframe|link|script|style|video|audio|source|object|embed)\b[^>]*>", re.I)
+_URL = re.compile(r"<?\b(?:https?|ftp|data|javascript):[^\s<>)\]]*>?", re.IGNORECASE)
+LINK_REMOVED: Final = "[link removido]"
+
+
+def strip_external(text: str) -> str:
+    """Drop images, links, URLs and active HTML from model text before anyone renders it."""
+    if not text:
+        return text
+    out = _HTML_TAG.sub("", text)
+    out = _IMAGE.sub("", out)
+    out = _LINK_DEFINITION.sub("", out)
+    out = _LINK.sub(r"\1", out)
+    out = _URL.sub(LINK_REMOVED, out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return re.sub(r"\n{3,}", "\n\n", out).strip()
 
 
 def _quote(identifier: str) -> str:

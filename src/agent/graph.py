@@ -33,7 +33,7 @@ from src.db import tools
 from src.db.tools import QueryError, QueryResult, SchemaInfo, discover_schema, run_sql
 from src.llm import LLMError, StructuredLLM
 from src.observability import Tracer
-from src.privacy import Pseudonymizer, load_pseudonymizer
+from src.privacy import Pseudonymizer, load_pseudonymizer, strip_external
 from src.progress import Listener, Progress, ProgressKind, listening, report
 from src.run_context import RunInfo, run_scope
 from src.semantic.dictionary import SemanticDictionary, load_dictionary, validate_against_schema
@@ -392,21 +392,44 @@ class Assistant:
         )
         if self.tracer is not None:
             self.tracer.write(self._masked(response))
-        return self._unmasked(response)
+        return self._unmasked(response, self._seen_tokens(question, final))
 
     def history(self, thread_id: str) -> list[Turn]:
         """The turns kept for ``thread_id`` (masked), oldest first; empty for an unknown thread."""
         snapshot = self._graph.get_state({"configurable": {"thread_id": thread_id}})
         return list(snapshot.values.get("history", []))
 
-    def _unmasked(self, response: AgentResponse) -> AgentResponse:
-        """What the user sees: the model's tokens turned back into real values."""
+    def _seen_tokens(self, question: str, final: dict[str, object]) -> set[str]:
+        """Tokens the model was shown in this turn: the question, its query results and the history.
+
+        Only these go back to real values in the answer, so a model steered by injected text cannot
+        turn ``[email_1]|[email_2]|...`` into the real list (feedback 2026-11-14, 2.1).
+        """
         p = self.privacy
+        seen = p.tokens_in(p.mask(question))
+        results = final.get("results")
+        if isinstance(results, dict):
+            for result in results.values():
+                for row in p.mask_rows(result.rows):
+                    seen.update(t for v in row if isinstance(v, str) for t in p.tokens_in(v))
+        history = final.get("history")
+        if isinstance(history, list):
+            for turn in history[:-1]:  # the last turn is this one, written by ``remember`` from the model's text
+                seen |= p.tokens_in(f"{turn.question} {turn.sql} {turn.answer}")
+        return seen
+
+    def _unmasked(self, response: AgentResponse, seen: set[str]) -> AgentResponse:
+        """What the user sees: no external content, and the turn's tokens turned back into real values."""
+        p = self.privacy
+
+        def show(text: str) -> str:
+            return p.unmask(strip_external(text), allowed=seen)
+
         return response.model_copy(
             update={
-                "answer": p.unmask(response.answer),
-                "assumptions": [p.unmask(a) for a in response.assumptions],
-                "steps": [s.model_copy(update={"thought": p.unmask(s.thought)}) for s in response.steps],
+                "answer": show(response.answer),
+                "assumptions": [show(a) for a in response.assumptions],
+                "steps": [s.model_copy(update={"thought": show(s.thought)}) for s in response.steps],
             }
         )
 

