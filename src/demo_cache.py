@@ -28,10 +28,10 @@ Conversation = tuple[str, ...]
 
 
 def demo_conversations() -> tuple[Conversation, ...]:
-    """The script's conversations, each as the screen asks it (a new conversation per tuple)."""
+    """The demo conversations, each as the screen asks it (a new conversation per tuple)."""
     ranking, whatsapp, average, by_channel, trend = texts.SUGGESTED_QUESTIONS
     return (
-        (trend, DELETE_REQUEST),  # roteiro_falado.md: the "Tendência" suggestion, then the write request
+        (trend, DELETE_REQUEST),  # the "Tendência" suggestion, then the write request in the same conversation
         (by_channel, FOLLOW_UP),  # conversation memory: a follow-up that only makes sense after P4
         (ranking,),
         (whatsapp,),

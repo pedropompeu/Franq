@@ -20,11 +20,11 @@ def settings(db_path: Path, tmp_path: Path) -> Settings:
     return dataclasses.replace(Settings.from_env(), db_path=db_path, trace_path=tmp_path / "traces.jsonl")
 
 
-def test_demo_conversations_follow_the_script() -> None:
+def test_demo_conversations_follow_the_screen() -> None:
     conversations = demo_conversations()
     ranking, whatsapp, average, by_channel, trend = texts.SUGGESTED_QUESTIONS
 
-    assert conversations[0] == (trend, DELETE_REQUEST)  # roteiro: Tendência, then the write request
+    assert conversations[0] == (trend, DELETE_REQUEST)  # Tendência, then the write request
     assert (by_channel, FOLLOW_UP) in conversations
     assert {(ranking,), (whatsapp,), (average,), (DELETE_REQUEST,)} <= set(conversations)
 
