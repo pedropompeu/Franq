@@ -4,32 +4,30 @@ Single agent with clearly separated nodes (no multi-agent: saves quota and keeps
 auditable). Limits: at most ``max_steps`` LLM decisions and ``max_corrections`` failed
 queries per question.
 
-Memory: the graph is compiled with an in-memory checkpointer, so each ``thread_id`` keeps its
-``history`` (masked question, SQL and answer of every finished turn) between calls. Everything
-else in the state is per question and reset by ``ask``. Without a ``thread_id`` the call runs on
-a throwaway thread that is deleted afterwards: no memory, as before.
+Memory: ``ask`` reads the conversation's earlier turns from a ``ConversationStore``
+(``src/agent/memory.py``: masked question, SQL and answer only, bounded by LRU and TTL), passes
+them in as ``history`` and stores the finished ``turn`` afterwards. The graph itself keeps no
+state between calls (no checkpointer), and questions of one ``thread_id`` run one at a time.
+Without a ``thread_id`` nothing is kept.
 """
 
 from __future__ import annotations
 
-import operator
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Annotated, Literal, TypedDict
+from typing import Literal, TypedDict
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from src.agent import models
+from src.agent.memory import ConversationStore
 from src.agent.models import AgentDecision, AgentResponse, ChartSpec, Step, TokenUsage, Turn
 from src.agent.notices import compute_notices
 from src.agent.prompts import build_context, build_messages
 from src.config import Settings
-from src.db import tools
 from src.db.lineage import pii_derived_columns
 from src.db.tools import QueryError, QueryResult, SchemaInfo, discover_schema, run_sql
 from src.llm import LLMError, StructuredLLM
@@ -43,10 +41,12 @@ from src.versioning import prompt_version
 REFUSAL_FALLBACK = "Não posso atender a esse pedido. Só respondo perguntas consultando os dados."
 
 
-class QuestionState(TypedDict):
-    """What ``ask`` resets at the start of every question."""
+class AgentState(TypedDict):
+    """One question's state; ``history`` comes in from the conversation, ``turn`` goes back to it."""
 
     question: str
+    history: list[Turn]  # earlier turns of the conversation, masked, oldest first
+    turn: Turn | None  # this question's turn, written by ``remember``
     context: str
     steps: list[Step]
     results: dict[int, QueryResult]
@@ -57,28 +57,6 @@ class QuestionState(TypedDict):
     model: str
     usage: TokenUsage
     response: AgentResponse | None
-
-
-class AgentState(QuestionState):
-    history: Annotated[list[Turn], operator.add]  # the only key that survives between questions
-
-
-# Our types that the checkpointer may store and read back. LangGraph only warns today about a type
-# outside this list, but its strict mode (and a future version) refuses to deserialize it.
-_CHECKPOINT_TYPES: tuple[type, ...] = (
-    models.AgentDecision,
-    models.AgentResponse,
-    models.ChartSpec,
-    models.Notice,
-    models.Step,
-    models.TokenUsage,
-    models.Turn,
-    tools.ColumnInfo,
-    tools.QueryError,
-    tools.QueryResult,
-    tools.SchemaInfo,
-    tools.TableInfo,
-)
 
 
 @dataclass(frozen=True)
@@ -146,7 +124,7 @@ class Assistant:
         self.schema_warnings: list[str] = []
         self.schema: SchemaInfo | None = None
         self.prompt_version = prompt_version(settings.dictionary_path)
-        self._memory = InMemorySaver(serde=JsonPlusSerializer(allowed_msgpack_modules=_CHECKPOINT_TYPES))
+        self.conversations = ConversationStore()
         self._graph = self._build()
 
     # ------------------------------------------------------------------ nodes
@@ -312,7 +290,7 @@ class Assistant:
             answer=p.mask(response.answer),
             status=response.status,
         )
-        return {"history": [turn]}
+        return {"turn": turn}
 
     def _pii_columns(self, sql: str, result: QueryResult) -> list[int]:
         """Result columns carrying (pieces of) personal data, masked before the model reads them."""
@@ -357,7 +335,7 @@ class Assistant:
         graph.add_conditional_edges("finalize", self._loop_or_end)
         graph.add_edge("refuse", "remember")
         graph.add_edge("remember", END)
-        return graph.compile(checkpointer=self._memory)
+        return graph.compile()
 
     # ------------------------------------------------------------------ entry
 
@@ -367,32 +345,29 @@ class Assistant:
         Questions with the same ``thread_id`` share a conversation: the model sees the last turns and
         can resolve follow-ups like "e no Chat?". ``None`` means a standalone question.
         """
-        started = time.monotonic()
-        initial: QuestionState = {
-            "question": question,
-            "context": "",
-            "steps": [],
-            "results": {},
-            "decision": None,
-            "corrections": 0,
-            "llm_calls": 0,
-            "cache_hits": 0,
-            "model": "",
-            "usage": TokenUsage(),
-            "response": None,
-        }  # ``history`` is not reset: the checkpointer carries it over from earlier turns
         trace_id = uuid.uuid4().hex[:12]
-        thread = thread_id or uuid.uuid4().hex
-        config: RunnableConfig = {
-            "configurable": {"thread_id": thread},
-            "recursion_limit": 4 * self.limits.max_steps + 10,
-        }
-        try:
+        config: RunnableConfig = {"recursion_limit": 4 * self.limits.max_steps + 10}
+        with self.conversations.hold(thread_id) if thread_id is not None else nullcontext():
+            started = time.monotonic()
+            initial: AgentState = {
+                "question": question,
+                "history": self.conversations.turns(thread_id) if thread_id is not None else [],
+                "turn": None,
+                "context": "",
+                "steps": [],
+                "results": {},
+                "decision": None,
+                "corrections": 0,
+                "llm_calls": 0,
+                "cache_hits": 0,
+                "model": "",
+                "usage": TokenUsage(),
+                "response": None,
+            }
             with listening(on_progress), run_scope(RunInfo(trace_id, self.prompt_version, thread_id)):
                 final = self._graph.invoke(initial, config)
-        finally:
-            if thread_id is None:
-                self._memory.delete_thread(thread)
+            if thread_id is not None and final["turn"] is not None:
+                self.conversations.append(thread_id, final["turn"])
         response: AgentResponse = final["response"]
         if response.status == "answered" and response.data is not None and self.schema is not None:
             notices = compute_notices(response.data.sql, response.data, self.schema, self.settings)
@@ -414,8 +389,7 @@ class Assistant:
 
     def history(self, thread_id: str) -> list[Turn]:
         """The turns kept for ``thread_id`` (masked), oldest first; empty for an unknown thread."""
-        snapshot = self._graph.get_state({"configurable": {"thread_id": thread_id}})
-        return list(snapshot.values.get("history", []))
+        return self.conversations.turns(thread_id)
 
     def _seen_tokens(self, question: str, final: dict[str, object]) -> set[str]:
         """Tokens the model was shown in this turn: the question, its query results and the history.
@@ -432,7 +406,7 @@ class Assistant:
                     seen.update(t for v in row if isinstance(v, str) for t in p.tokens_in(v))
         history = final.get("history")
         if isinstance(history, list):
-            for turn in history[:-1]:  # the last turn is this one, written by ``remember`` from the model's text
+            for turn in history:  # earlier turns only: this one is in ``final["turn"]``
                 seen |= p.tokens_in(f"{turn.question} {turn.sql} {turn.answer}")
         return seen
 

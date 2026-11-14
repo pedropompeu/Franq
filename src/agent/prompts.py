@@ -86,7 +86,7 @@ def render_history(
     return "\n\n".join(parts)
 
 
-HISTORY_TURNS = 3  # earlier turns shown to the model; older ones stay in the checkpoint only
+HISTORY_TURNS = 3  # earlier turns shown to the model; older ones stay in the conversation store only
 
 CONVERSATION_NOTE = (
     'Use a conversa só para resolver referências da nova pergunta (ex.: "e no Chat?"). '

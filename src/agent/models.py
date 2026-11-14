@@ -109,7 +109,7 @@ class Turn(BaseModel):
     """One finished question of a conversation, as the next prompt sees it.
 
     Everything is masked (``[nome_N]`` tokens instead of personal values) and there are no result
-    rows: the model must query again for numbers, and the checkpoint never keeps what the user saw.
+    rows: the model must query again for numbers, and the conversation store never keeps what the user saw.
     """
 
     question: str

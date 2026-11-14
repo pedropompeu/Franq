@@ -71,7 +71,7 @@ A aba **Visão em grafo** mostra como estados, categorias de compra, canais de c
 
 ### Memória de conversa
 
-Perguntas seguidas na mesma conversa se entendem: depois de "Qual o número de reclamações não resolvidas por canal?", basta perguntar "E só no Chat?". Cada conversa tem um `thread_id`, guardado pelo checkpointer do LangGraph ([ADR 0008](docs/adr/0008-memoria-de-conversa-por-thread.md)). Na interface, o botão "Nova conversa" começa outra.
+Perguntas seguidas na mesma conversa se entendem: depois de "Qual o número de reclamações não resolvidas por canal?", basta perguntar "E só no Chat?". Cada conversa tem um `thread_id`. O histórico guarda só pergunta, SQL e resposta mascaradas, com limite de conversas e de tempo ([ADR 0008](docs/adr/0008-memoria-de-conversa-por-thread.md)). Na interface, o botão "Nova conversa" começa outra.
 
 O modelo vê os 3 últimos turnos: pergunta, SQL e resposta, com fichas no lugar de nomes e e-mails e sem linhas de resultado. Números sempre vêm de uma consulta nova. A memória fica em RAM e some quando o processo reinicia.
 

@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from langchain_core.messages import BaseMessage
-from langgraph.checkpoint.serde.event_hooks import SerdeEvent, register_serde_event_listener
 
 from src.agent.graph import AgentLimits, Assistant, resolve_chart
 from src.agent.models import AgentDecision, TokenUsage
@@ -222,20 +221,15 @@ def test_follow_up_sees_previous_turn(settings: Settings) -> None:
     assert follow_up.index("# Conversa anterior") < follow_up.index("# Pergunta do usuário")
 
 
-def test_checkpoint_types_are_registered(settings: Settings) -> None:
-    """LangGraph warns (and will later refuse) when a checkpoint holds a type outside its allowlist."""
-    events: list[SerdeEvent] = []
-    unregister = register_serde_event_listener(events.append)
-    try:
-        llm = FakeLLM([*turn(P4_SQL, "Tickets por canal."), *turn(CHAT_SQL, "No Chat.")])
-        assistant = Assistant(llm, settings)
-        assistant.ask("Quantos tickets por canal?", thread_id="t1")
-        assistant.ask("E só no Chat?", thread_id="t1")
-        assert len(assistant.history("t1")) == 2
-    finally:
-        unregister()
-
-    assert [(e["kind"], e["module"], e["name"]) for e in events] == []
+def test_results_never_enter_the_conversation_store(settings: Settings) -> None:
+    """Only masked question, SQL and answer survive the turn; result rows stay out (feedback 3.2)."""
+    llm = FakeLLM([*turn(P4_SQL, "Tickets por canal."), *turn(CHAT_SQL, "No Chat.")])
+    assistant = Assistant(llm, settings)
+    assistant.ask("Quantos tickets por canal?", thread_id="t1")
+    assistant.ask("E só no Chat?", thread_id="t1")
+    turns = assistant.history("t1")
+    assert [t.question for t in turns] == ["Quantos tickets por canal?", "E só no Chat?"]
+    assert set(turns[0].model_dump()) == {"question", "sql", "answer", "status"}
 
 
 def test_threads_are_isolated(settings: Settings) -> None:
@@ -285,4 +279,38 @@ def test_standalone_questions_leave_no_checkpoint(settings: Settings) -> None:
     assistant.ask("Tickets no Chat?")
     assistant.ask("De novo?")  # a failed call is cleaned up too
 
-    assert list(assistant._memory.list(None)) == []  # a long-running app would otherwise leak one thread per call
+    assert len(assistant.conversations) == 0  # a long-running app would otherwise leak one thread per call
+
+
+def test_same_thread_questions_run_one_at_a_time(settings: Settings) -> None:
+    """Two requests on one ``thread_id`` must not interleave their turns (feedback 3.1)."""
+    import threading
+
+    inside = threading.Event()
+    release = threading.Event()
+    overlap: list[bool] = []
+
+    class SlowLLM(FakeLLM):
+        active = 0
+
+        def decide(self, messages):  # type: ignore[no-untyped-def]
+            SlowLLM.active += 1
+            overlap.append(SlowLLM.active > 1)
+            inside.set()
+            release.wait(2)
+            SlowLLM.active -= 1
+            return super().decide(messages)
+
+    llm = SlowLLM([*turn(CHAT_SQL, "Um."), *turn(CHAT_SQL, "Dois.")])
+    assistant = Assistant(llm, settings)
+    first = threading.Thread(target=assistant.ask, args=("Primeira?",), kwargs={"thread_id": "t"})
+    second = threading.Thread(target=assistant.ask, args=("Segunda?",), kwargs={"thread_id": "t"})
+    first.start()
+    inside.wait(2)
+    second.start()
+    second.join(0.2)
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert not any(overlap)
+    assert [t.question for t in assistant.history("t")] == ["Primeira?", "Segunda?"]
