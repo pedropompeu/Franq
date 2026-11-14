@@ -30,6 +30,7 @@ from src.agent.notices import compute_notices
 from src.agent.prompts import build_context, build_messages
 from src.config import Settings
 from src.db import tools
+from src.db.lineage import pii_derived_columns
 from src.db.tools import QueryError, QueryResult, SchemaInfo, discover_schema, run_sql
 from src.llm import LLMError, StructuredLLM
 from src.observability import Tracer
@@ -140,7 +141,8 @@ class Assistant:
         self.tracer = tracer
         self.dictionary = dictionary or load_dictionary(settings.dictionary_path)
         # Personal data never leaves for the LLM: see src/privacy.py.
-        self.privacy = privacy or load_pseudonymizer(settings.db_path, self.dictionary.pii_columns())
+        self.pii = self.dictionary.pii_columns()
+        self.privacy = privacy or load_pseudonymizer(settings.db_path, self.pii)
         self.schema_warnings: list[str] = []
         self.schema: SchemaInfo | None = None
         self.prompt_version = prompt_version(settings.dictionary_path)
@@ -190,7 +192,8 @@ class Assistant:
                 ),
             }
         # The model writes tokens like '[nome_3]'; the SQL runs (and is shown) with the real value.
-        decision = reply.decision.model_copy(update={"sql": self.privacy.unmask_sql(reply.decision.sql)})
+        extra = self._derived_map(state["results"])
+        decision = reply.decision.model_copy(update={"sql": self.privacy.unmask_sql(reply.decision.sql, extra=extra)})
         return {
             "decision": decision,
             "llm_calls": state["llm_calls"] + 1,
@@ -227,6 +230,7 @@ class Assistant:
                 )
         else:
             report(Progress("query_done", rows=outcome.row_count, elapsed_ms=outcome.elapsed_ms))
+            outcome = outcome.model_copy(update={"pii_columns": self._pii_columns(decision.sql, outcome)})
             steps.append(
                 Step(
                     index=index,
@@ -310,6 +314,20 @@ class Assistant:
         )
         return {"history": [turn]}
 
+    def _pii_columns(self, sql: str, result: QueryResult) -> list[int]:
+        """Result columns carrying (pieces of) personal data, masked before the model reads them."""
+        tables = self.schema.tables if self.schema is not None else []
+        schema = {t.name: {c.name: c.declared_type or "TEXT" for c in t.columns} for t in tables}
+        return sorted(pii_derived_columns(sql, schema, self.pii, width=len(result.columns)))
+
+    def _derived_map(self, results: object) -> dict[str, str]:
+        """Derived tokens of this turn's results back to their real values."""
+        found: dict[str, str] = {}
+        if isinstance(results, dict):
+            for result in results.values():
+                found.update(self.privacy.derived_map(result.rows, result.pii_columns))
+        return found
+
     # ---------------------------------------------------------------- routing
 
     @staticmethod
@@ -392,7 +410,7 @@ class Assistant:
         )
         if self.tracer is not None:
             self.tracer.write(self._masked(response))
-        return self._unmasked(response, self._seen_tokens(question, final))
+        return self._unmasked(response, self._seen_tokens(question, final), self._derived_map(final.get("results")))
 
     def history(self, thread_id: str) -> list[Turn]:
         """The turns kept for ``thread_id`` (masked), oldest first; empty for an unknown thread."""
@@ -410,7 +428,7 @@ class Assistant:
         results = final.get("results")
         if isinstance(results, dict):
             for result in results.values():
-                for row in p.mask_rows(result.rows):
+                for row in p.mask_rows(result.rows, derived=result.pii_columns):
                     seen.update(t for v in row if isinstance(v, str) for t in p.tokens_in(v))
         history = final.get("history")
         if isinstance(history, list):
@@ -418,12 +436,15 @@ class Assistant:
                 seen |= p.tokens_in(f"{turn.question} {turn.sql} {turn.answer}")
         return seen
 
-    def _unmasked(self, response: AgentResponse, seen: set[str]) -> AgentResponse:
-        """What the user sees: no external content, and the turn's tokens turned back into real values."""
+    def _unmasked(self, response: AgentResponse, seen: set[str], derived: dict[str, str]) -> AgentResponse:
+        """What the user sees: no external content, and the turn's tokens turned back into real values.
+
+        A derived token from an earlier turn stays a token: its value is not in this turn's results.
+        """
         p = self.privacy
 
         def show(text: str) -> str:
-            return p.unmask(strip_external(text), allowed=seen)
+            return p.unmask(strip_external(text), allowed=seen, extra=derived)
 
         return response.model_copy(
             update={

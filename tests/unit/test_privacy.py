@@ -192,3 +192,82 @@ def test_tokens_from_the_turn_results_are_still_unmasked(settings: Settings) -> 
     llm = FakeLLM([query(sql), answer(sql, "É [nome_1] ([email_1]); [email_2] não apareceu.")])
     response = Assistant(llm, settings).ask("Quem é o primeiro cliente?")
     assert response.answer == f"É {nome} ({email}); [email_2] não apareceu."
+
+
+# ------------------------------------------------------------------ derived values (2.3) and accents
+
+SCHEMA = {"clientes": {"id": "INTEGER", "nome": "TEXT", "email": "TEXT", "estado": "TEXT"}}
+PII = frozenset({"clientes.nome", "clientes.email"})
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT estado, COUNT(*) FROM clientes GROUP BY estado", set()),
+        ("SELECT substr(nome, 1, 3) AS ini, estado FROM clientes", {0}),
+        ("SELECT * FROM clientes", {1, 2}),
+        ("SELECT c.estado, group_concat(c.email) FROM clientes AS c GROUP BY 1", {1}),
+        ("WITH t AS (SELECT replace(email, '@', ' ') AS e FROM clientes) SELECT e FROM t", {0}),
+        ("SELECT estado FROM clientes UNION SELECT nome FROM clientes", {0}),
+        ("SELECT (SELECT max(nome) FROM clientes) AS m, 1 AS um", {0}),
+    ],
+)
+def test_lineage_finds_columns_derived_from_personal_data(sql: str, expected: set[int]) -> None:
+    from src.db.lineage import pii_derived_columns
+
+    assert pii_derived_columns(sql, SCHEMA, PII) == frozenset(expected)
+
+
+def test_lineage_is_conservative_when_it_cannot_parse() -> None:
+    from src.db.lineage import pii_derived_columns
+
+    assert pii_derived_columns("SELECT nome FROM clientes WHERE (((", SCHEMA, PII, width=2) == {0, 1}
+    assert pii_derived_columns("SELECT estado FROM clientes WHERE (((", SCHEMA, PII, width=1) == frozenset()
+
+
+def test_derived_cells_become_tokens_but_whole_tokens_stay() -> None:
+    rows = [["Ana", "[x]", "ANA LIMA", "ana@example.com, joao@example.net", 3]]
+    masked = PEOPLE.mask_rows(rows, derived={0, 2, 3, 4})
+    first, second, third, fourth, fifth = masked[0]
+    assert isinstance(first, str) and first.startswith("[derivado_") and "Ana" not in first
+    assert second == "[x]"  # not a derived column
+    assert third == "[nome_1]" and fourth == "[email_1], [email_2]" and fifth == 3
+    assert PEOPLE.mask_rows(rows, derived={0}) == PEOPLE.mask_rows(rows, derived={0})  # deterministic
+    assert PEOPLE.unmask(f"{first}!", extra=PEOPLE.derived_map(rows, {0})) == "Ana!"
+
+
+def test_derived_token_is_keyed_by_the_data_not_a_bare_hash() -> None:
+    other = Pseudonymizer.from_rows({"nome": ["Outra Pessoa"]})
+    assert PEOPLE.derived_token("Ana") != other.derived_token("Ana")
+
+
+def test_question_masking_ignores_accents() -> None:
+    assert PEOPLE.mask("e o Joao D'Avila?") == "e o [nome_2]?"
+    assert PEOPLE.mask("e o JOÃO D'ÁVILA?") == "e o [nome_2]?"
+    assert PEOPLE.mask_cell("joao d'avila") == "[nome_2]"
+    assert PEOPLE.mask("sem nomes aqui") == "sem nomes aqui"
+
+
+def test_llm_never_sees_pieces_of_names(settings: Settings) -> None:
+    nome, email = first_client(settings.db_path)
+    first_name, user = nome.split()[0], email.split("@")[0]
+    sql = (
+        "SELECT substr(nome, 1, instr(nome, ' ') - 1) AS primeiro, substr(email, 1, instr(email, '@') - 1) AS u "
+        "FROM clientes ORDER BY rowid LIMIT 1"
+    )
+    assistant = Assistant(FakeLLM([]), settings)
+    token = assistant.privacy.derived_token(first_name)
+    llm = FakeLLM([query(sql), answer(sql, f"Primeiro nome: {token}.")])
+    assistant.llm = llm
+    response = assistant.ask("Primeiro nome do primeiro cliente?")
+    prompts = "\n".join(llm.prompts)
+    assert f'"{first_name}"' not in prompts and f'"{user}"' not in prompts
+    assert token in prompts
+    assert response.answer == f"Primeiro nome: {first_name}."  # the user still sees the real value
+
+
+def test_lineage_is_conservative_when_names_or_widths_do_not_match() -> None:
+    from src.db.lineage import pii_derived_columns
+
+    assert pii_derived_columns("SELECT estado AS x, nome AS x FROM clientes", SCHEMA, PII) == {0, 1}
+    assert pii_derived_columns("SELECT nome FROM clientes", SCHEMA, PII, width=2) == {0, 1}

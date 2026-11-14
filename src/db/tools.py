@@ -43,6 +43,7 @@ class QueryResult(BaseModel):
     row_count: int
     truncated: bool
     elapsed_ms: float
+    pii_columns: list[int] = []  # result columns derived from personal data (filled by the agent)
 
 
 class QueryError(BaseModel):

@@ -59,7 +59,7 @@ def build_context(schema_prompt: str, semantic_prompt: str) -> str:
 def _result_block(result: QueryResult, max_rows: int, privacy: Pseudonymizer) -> str:
     payload = {
         "colunas": result.columns,
-        "linhas": privacy.mask_rows(result.rows[:max_rows]),
+        "linhas": privacy.mask_rows(result.rows[:max_rows], derived=result.pii_columns),
         "total_de_linhas": result.row_count,
         "truncado": result.truncated or result.row_count > max_rows,
     }
