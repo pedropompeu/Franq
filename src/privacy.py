@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
+from src.db.tools import readonly_uri
+
 TOKEN: Final = re.compile(r"\[([a-z_]+)_(\d+)\]")
 MIN_SUBSTRING_LEN: Final = 4  # shorter values are only masked when they fill a whole cell
 DERIVED_LABEL: Final = "derivado"
@@ -221,7 +223,7 @@ def load_pseudonymizer(db_path: Path, columns: Iterable[str]) -> Pseudonymizer:
         if table and column:
             by_table[table].append(column)
     rows: dict[str, list[str | None]] = {}
-    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as con:
+    with closing(sqlite3.connect(readonly_uri(db_path), uri=True)) as con:
         for table, wanted in by_table.items():
             existing = {r[1] for r in con.execute(f"PRAGMA table_info({_quote(table)})")}
             present = [c for c in wanted if c in existing]

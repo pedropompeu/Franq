@@ -271,3 +271,16 @@ def test_lineage_is_conservative_when_names_or_widths_do_not_match() -> None:
 
     assert pii_derived_columns("SELECT estado AS x, nome AS x FROM clientes", SCHEMA, PII) == {0, 1}
     assert pii_derived_columns("SELECT nome FROM clientes", SCHEMA, PII, width=2) == {0, 1}
+
+
+def test_database_opens_from_a_path_with_uri_characters(db_path: Path, tmp_path: Path) -> None:
+    """``file:{path}`` breaks on '#', '?' or '%' in a folder name (and on Windows drive paths)."""
+    from src.evaluation import run_reference
+    from src.privacy import load_pseudonymizer
+
+    folder = tmp_path / "dados #1 ?100%"
+    folder.mkdir()
+    copy = folder / db_path.name
+    copy.write_bytes(db_path.read_bytes())
+    assert load_pseudonymizer(copy, ["clientes.nome"]).active  # a wrong file would mask nothing
+    assert run_reference(copy, "SELECT COUNT(*) FROM clientes")[1][0][0] > 0

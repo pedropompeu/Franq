@@ -64,6 +64,7 @@ from pydantic import BaseModel, Field
 from src.agent.graph import Assistant
 from src.agent.models import AgentResponse, NoticeKind
 from src.config import PROJECT_ROOT, Settings, load_env_file
+from src.db.tools import readonly_uri
 from src.langfuse_bridge import DatasetSink, langfuse_dataset_sink
 from src.llm import SCHEMA_ERROR, LLMReply, StructuredLLM, get_llm
 from src.observability import Tracer
@@ -290,7 +291,7 @@ def states_value(text: str, value: Any) -> bool:
 
 
 def run_reference(db_path: Path, sql: str) -> Table:
-    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as con:
+    with closing(sqlite3.connect(readonly_uri(db_path), uri=True)) as con:
         cur = con.execute(sql)
         return [d[0] for d in cur.description], cur.fetchall()
 

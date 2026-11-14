@@ -160,11 +160,17 @@ def _authorizer(action: int, arg1: str | None, _arg2: str | None, _db: str | Non
     return sqlite3.SQLITE_OK
 
 
+def readonly_uri(db_path: Path) -> str:
+    """SQLite URI that opens ``db_path`` read-only. ``as_uri`` percent-encodes '#', '?' and '%' and
+    handles Windows drive paths; a raw ``file:{path}`` would cut the path at '?' and open another file."""
+    return f"{db_path.resolve().as_uri()}?mode=ro"
+
+
 def _connect_ro(db_path: Path) -> sqlite3.Connection:
     if not db_path.is_file():
         # mode=ro would fail anyway, but a clear message helps the operator.
         raise sqlite3.OperationalError(f"banco não encontrado: {db_path}")
-    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False)
+    conn = sqlite3.connect(readonly_uri(db_path), uri=True, check_same_thread=False)
     conn.execute("PRAGMA query_only = ON")
     conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
     return conn
