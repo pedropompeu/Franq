@@ -151,6 +151,8 @@ GOOGLE_CLOUD_LOCATION=southamerica-east1   # padrão; troque se o modelo não es
 
 O Vertex é o caminho para produção: cobrança no projeto, cota maior e escolha da região dos dados (São Paulo por padrão, o que ajuda na conversa sobre LGPD). Cada provedor tem seu próprio registro de cota, então a cota esgotada no AI Studio não bloqueia o Vertex. O restante (fallback, cache, pseudonimização) não muda.
 
+O caminho do Vertex está coberto por testes com modelo falso (escolha do provedor, variáveis exigidas, cota separada). Não foi testado ao vivo: o Vertex exige um projeto com faturamento ativo, que não foi ligado para o desafio. A avaliação e a demo usam o AI Studio.
+
 ## Observabilidade
 
 Cada pergunta gera um rastro em `traces/traces.jsonl`: passos, SQL, erros, modelo, tokens, latência, versão do prompt e se a chamada veio do cache. Os rastros guardam a pergunta e a SQL com as fichas no lugar de nomes e e-mails e nunca guardam linhas de resultado. A aba de rastros da interface lê esse arquivo e mostra um painel com respostas, recusas, falhas, autocorreções, latência mediana e p95, tokens e custo estimado por mil perguntas.
