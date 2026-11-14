@@ -1,0 +1,6 @@
+# LF em todo arquivo de texto, inclusive num clone no Windows (core.autocrlf=true): a versão do
+# prompt e o hash do conjunto congelado são calculados sobre bytes e devem bater com os publicados.
+* text=auto eol=lf
+
+*.db binary
+*.png binary

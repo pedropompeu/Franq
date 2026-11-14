@@ -628,7 +628,8 @@ PARAPHRASES_SHA256 = "2edd50e391159a2674799aaf05513e3b84d8eeb26a3d8d5fb9b45805fe
 
 
 def test_frozen_set_is_unchanged() -> None:
-    assert hashlib.sha256(PARAPHRASES_PATH.read_bytes()).hexdigest() == PARAPHRASES_SHA256
+    data = PARAPHRASES_PATH.read_bytes().replace(b"\r\n", b"\n")  # same hash on a Windows clone
+    assert hashlib.sha256(data).hexdigest() == PARAPHRASES_SHA256
 
 
 def test_frozen_set_is_valid_and_apart_from_the_tuning_set(db_path: Path) -> None:

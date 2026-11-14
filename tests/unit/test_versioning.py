@@ -83,3 +83,15 @@ def test_llm_sees_run_info_during_ask(settings: Settings) -> None:
         assert info.prompt_version == assistant.prompt_version
         assert info.thread_id is None
     assert current_run() is None
+
+
+def test_prompt_version_ignores_line_endings(settings: Settings, tmp_path: Path) -> None:
+    """A Windows clone (core.autocrlf=true) must report the same version as the published one."""
+    sources = []
+    for source in PROMPT_SOURCES:
+        copy = tmp_path / source.name
+        copy.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
+        sources.append(copy)
+    dictionary = tmp_path / "dictionary.yaml"
+    dictionary.write_bytes(settings.dictionary_path.read_bytes().replace(b"\n", b"\r\n"))
+    assert prompt_version(dictionary, sources) == prompt_version(settings.dictionary_path)
