@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -145,3 +146,62 @@ def test_regression_question_1_reference_sql(db_path: Path) -> None:
         ["Alagoas", 2],
         ["Espírito Santo", 2],
     ]
+
+
+# ------------------------------------------------- resource limits (feedback 2026-11-14, 2.2 and 2.4)
+
+HEAVY_SCALARS = [
+    "SELECT length(printf('%.*c', 1000000000, 'x'))",  # a single huge string, one VM instruction
+    "SELECT length(zeroblob(2000000000))",
+    "SELECT length(replace(hex(zeroblob(400000)), '0', '00000'))",
+]
+
+
+@pytest.mark.parametrize("sql", HEAVY_SCALARS)
+def test_huge_scalar_values_fail_fast(sql: str, db_path: Path) -> None:
+    started = time.monotonic()
+    result = run_sql(sql, db_path, timeout_s=5)
+    assert isinstance(result, QueryError)
+    assert result.kind in {"validation", "execution"}  # printf is caught by the AST, the rest by the engine
+    assert time.monotonic() - started < 2
+
+
+def test_result_size_is_capped_in_bytes(db_path: Path) -> None:
+    sql = (
+        "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 400) "
+        "SELECT hex(zeroblob(250000)) FROM r"
+    )
+    result = run_sql(sql, db_path, max_rows=1000, timeout_s=5)
+    assert isinstance(result, QueryError)
+    assert "grande demais" in result.message
+
+
+def test_deeply_nested_sql_is_a_validation_error(db_path: Path) -> None:
+    sql = "SELECT " + "(" * 500 + "1" + ")" * 500
+    assert isinstance(validate_sql(sql), QueryError)
+    result = run_sql(sql, db_path)
+    assert isinstance(result, QueryError)
+    assert result.kind == "validation"
+
+
+def test_oversized_sql_text_is_rejected(db_path: Path) -> None:
+    sql = "SELECT 1 WHERE 1 IN (" + ", ".join(["1"] * 5000) + ")"
+    result = run_sql(sql, db_path)
+    assert isinstance(result, QueryError)
+    assert result.kind == "validation"
+    assert "longa" in result.message
+
+
+@pytest.mark.parametrize(
+    ("sql", "allowed"),
+    [
+        ("SELECT printf('%.2f', 1.5)", True),
+        ("SELECT printf('%5d - %s', 1, 'a')", True),
+        ("SELECT format('%.1f%%', 12.34)", True),
+        ("SELECT printf('%.*c', 5, 'x')", False),
+        ("SELECT printf('%1000000c', 'x')", False),
+        ("SELECT printf(nome, 1) FROM clientes", False),
+    ],
+)
+def test_printf_needs_a_small_literal_format(sql: str, allowed: bool) -> None:
+    assert (validate_sql(sql) is None) is allowed

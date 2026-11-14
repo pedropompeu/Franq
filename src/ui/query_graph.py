@@ -129,7 +129,7 @@ def extract(sql: str, columns_by_table: Mapping[str, frozenset[str]]) -> QueryGr
     """``None`` when the SQL does not parse or touches no known table."""
     try:
         tree = sqlglot.parse_one(sql, read="sqlite")
-    except sqlglot.errors.SqlglotError:
+    except (sqlglot.errors.SqlglotError, RecursionError):
         return None
     if tree is None:
         return None

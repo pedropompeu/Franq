@@ -44,7 +44,7 @@ def br_date(iso: str) -> str:
 def _parse(sql: str) -> exp.Expr | None:
     try:
         return sqlglot.parse_one(sql, read="sqlite")
-    except sqlglot.errors.SqlglotError:
+    except (sqlglot.errors.SqlglotError, RecursionError):
         return None
 
 

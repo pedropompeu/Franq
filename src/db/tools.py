@@ -8,7 +8,11 @@ Security layers, in order (any one of them is enough to stop a write):
 3. ``PRAGMA query_only = ON``.
 4. ``sqlite3`` authorizer: only SELECT / READ / FUNCTION / RECURSIVE actions are allowed.
 5. Progress handler aborts statements that exceed the timeout.
-6. Row cap enforced by the caller side (``fetchmany``), never delegated to the model.
+6. ``SQLITE_LIMIT_LENGTH`` caps any single string or blob, which the progress handler cannot
+   see (one ``printf`` or ``zeroblob`` call is a single VM instruction).
+7. Row cap and a byte cap on the whole result, enforced while fetching, never delegated to the model.
+8. SQL text longer than ``MAX_SQL_CHARS`` is rejected before parsing; parser recursion errors
+   (deeply nested expressions) are validation errors.
 
 ``run_sql`` never raises: it returns ``QueryResult`` or ``QueryError`` so the agent graph
 can feed execution errors back to the model as data.
@@ -16,6 +20,7 @@ can feed execution errors back to the model as data.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 from functools import lru_cache
@@ -69,6 +74,13 @@ _FORBIDDEN_NODES: tuple[type[exp.Expression], ...] = (
 _FORBIDDEN_FUNCTIONS = frozenset({"load_extension", "readfile", "writefile", "edit", "fts3_tokenizer"})
 
 READ_ONLY_MESSAGE = "Só posso consultar dados (SELECT). Alterar, apagar ou criar dados não é permitido."
+TOO_BIG_MESSAGE = (
+    "O resultado ficou grande demais (limite de {limit}). Agregue, filtre ou devolva menos colunas de texto."
+)
+
+MAX_SQL_CHARS = 8_000
+MAX_VALUE_BYTES = 1_000_000  # any single string or blob
+MAX_RESULT_BYTES = 8_000_000  # the whole fetched result
 
 
 def validate_sql(sql: str) -> QueryError | None:
@@ -76,12 +88,18 @@ def validate_sql(sql: str) -> QueryError | None:
     text = sql.strip()
     if not text:
         return QueryError(kind="validation", message="A consulta está vazia.", sql=sql)
+    if len(text) > MAX_SQL_CHARS:
+        return QueryError(
+            kind="validation", message=f"A consulta é longa demais (limite de {MAX_SQL_CHARS} caracteres).", sql=sql
+        )
 
     try:
         statements = [s for s in sqlglot.parse(text, read="sqlite") if s is not None]
     except ParseError as err:
         first_line = str(err).splitlines()[0] if str(err) else "erro de sintaxe"
         return QueryError(kind="validation", message=f"SQL inválido: {first_line}", sql=sql)
+    except RecursionError:
+        return QueryError(kind="validation", message="SQL inválido: expressão aninhada demais.", sql=sql)
 
     if len(statements) != 1:
         return QueryError(
@@ -101,7 +119,29 @@ def validate_sql(sql: str) -> QueryError | None:
             name = (node.sql_name() if not isinstance(node, exp.Anonymous) else str(node.this)).lower()
             if name in _FORBIDDEN_FUNCTIONS:
                 return QueryError(kind="validation", message=f"Função não permitida: {name}.", sql=sql)
+            if name in _FORMAT_FUNCTIONS and not _safe_format(node):
+                return QueryError(
+                    kind="validation",
+                    message=f"{name}: use um formato literal, sem '*' e com largura de até 3 dígitos.",
+                    sql=sql,
+                )
     return None
+
+
+_FORMAT_FUNCTIONS = frozenset({"printf", "format"})
+_WIDE_SPEC = re.compile(r"%[-+ #0,!]*(\*|\d{4,})|%[-+ #0,!]*\d*\.(\*|\d{4,})")
+
+
+def _safe_format(node: exp.Func) -> bool:
+    """A literal format string with no ``*`` and no width or precision above 999.
+
+    One ``printf('%.*c', 1000000000, 'x')`` is a single VM instruction, so the progress handler
+    never sees it run (feedback 2026-11-14, 2.2).
+    """
+    first = node.this if isinstance(node, exp.Format) else (node.expressions[0] if node.expressions else None)
+    if not isinstance(first, exp.Literal) or not first.is_string:
+        return False
+    return _WIDE_SPEC.search(first.this) is None
 
 
 # ------------------------------------------------------------------------ connection
@@ -125,6 +165,7 @@ def _connect_ro(db_path: Path) -> sqlite3.Connection:
         raise sqlite3.OperationalError(f"banco não encontrado: {db_path}")
     conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False)
     conn.execute("PRAGMA query_only = ON")
+    conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
     return conn
 
 
@@ -145,6 +186,12 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, bytes):
         return f"<blob {len(value)} bytes>"
     return value
+
+
+def _byte_size(value: Any) -> int:
+    if isinstance(value, str | bytes):
+        return len(value)
+    return 8
 
 
 def run_sql(sql: str, db_path: Path, *, max_rows: int = 1000, timeout_s: float = 5.0) -> QueryOutcome:
@@ -173,8 +220,19 @@ def run_sql(sql: str, db_path: Path, *, max_rows: int = 1000, timeout_s: float =
         conn.set_progress_handler(_progress, 1000)
         cursor = conn.execute(sql)
         columns = [d[0] for d in cursor.description or []]
-        fetched = cursor.fetchmany(max_rows + 1)
+        fetched: list[tuple[Any, ...]] = []
+        size = 0
+        while len(fetched) <= max_rows:
+            batch = cursor.fetchmany(min(100, max_rows + 1 - len(fetched)))
+            if not batch:
+                break
+            size += sum(_byte_size(v) for row in batch for v in row)
+            if size > MAX_RESULT_BYTES:
+                return QueryError(kind="execution", message=TOO_BIG_MESSAGE.format(limit="8 MB"), sql=sql)
+            fetched.extend(batch)
     except sqlite3.Error as err:
+        if isinstance(err, sqlite3.DataError) or "too big" in str(err).lower():
+            return QueryError(kind="execution", message=TOO_BIG_MESSAGE.format(limit="1 MB por valor"), sql=sql)
         if timed_out:
             return QueryError(
                 kind="timeout",
