@@ -81,8 +81,9 @@ O modelo vê os 3 últimos turnos: pergunta, SQL e resposta, com fichas no lugar
 
 Dois avisos são calculados no código, a partir da SQL final e dos dados, nunca pelo modelo:
 
-- **Empate no corte:** num ranking com `LIMIT n`, se há linhas de fora empatadas com a n-ésima, a resposta avisa quais são. Na pergunta dos 5 estados, Alagoas, Espírito Santo e Paraná empatam com 2 clientes e só cabem dois.
-- **Período incompleto:** se a SQL filtra um ano ou mês inteiro que os dados cobrem só em parte, a resposta diz o intervalo real. "Em 2024" cobre só de 22/07/2024 a 31/12/2024.
+- **Empate no corte:** num ranking com `LIMIT n`, se há linhas de fora empatadas com a n-ésima, a resposta avisa quais são. Na pergunta dos 5 estados, Alagoas, Espírito Santo e Paraná empatam com 2 clientes e só cabem dois. Funciona também com `ORDER BY 2`. Sem segundo critério de ordenação, o aviso diz que quem fica de fora é arbitrário.
+- **Período incompleto:** se a SQL filtra um período que os dados cobrem só em parte, a resposta diz o intervalo real. "Em 2024" cobre só de 22/07/2024 a 31/12/2024. O filtro pode vir como `strftime(...) = '2024'`, `LIKE '2024%'`, `BETWEEN` ou `>=`/`<`. Um período sem nenhum dado ("agosto de 2025") é avisado como "sem registros".
+- **Pontas da série:** numa série mensal, o primeiro e o último mês que os dados cobrem só em parte são marcados. Nas reclamações, julho de 2024 começa no dia 23 e julho de 2025 termina no dia 22.
 
 Se a SQL não dá para analisar, não há aviso; um erro no cálculo de um aviso nunca derruba a resposta.
 
@@ -220,7 +221,7 @@ src/
   agent/                   grafo LangGraph, AgentDecision, prompts
   db/tools.py              run_sql com guardrails e descoberta do schema
   semantic/                dicionário de negócio e validação contra o schema
-  agent/notices.py         avisos de empate no corte e período incompleto
+  agent/notices.py         avisos de empate no corte, período incompleto e pontas da série
   api.py                   API FastAPI (/health, /conversations, /ask, /ask/stream)
   llm.py, resilience.py    provedores (AI Studio, Vertex), limitador, fallback, cache, registro de cota
   privacy.py               pseudonimização de nome e e-mail
