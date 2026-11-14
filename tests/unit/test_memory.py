@@ -64,3 +64,12 @@ def test_held_thread_is_not_evicted() -> None:
     with store.hold("a"):
         store.append("b", t(1))
         assert store.turns("a")
+
+
+def test_open_registers_an_empty_conversation_that_expires_like_any_other() -> None:
+    clock = Clock()
+    store = ConversationStore(ttl_s=10, clock=clock)
+    store.open("a")
+    assert "a" in store and "b" not in store and store.turns("a") == []
+    clock.now += 11
+    assert "a" not in store

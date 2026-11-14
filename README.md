@@ -105,17 +105,26 @@ O mesmo assistente da interface, em FastAPI ([ADR 0009](docs/adr/0009-api-fastap
 | Rota | O que faz |
 |---|---|
 | `GET /health` | Modelo e versão do prompt; 503 se o assistente não conseguiu subir |
+| `POST /conversations` | Abre uma conversa e devolve `{"thread_id": "..."}` |
 | `POST /ask` | `{"question": "...", "thread_id": "..."}` → resposta completa em JSON (texto, dados, gráfico, avisos, passos, custo) |
 | `POST /ask/stream` | O mesmo em Server-Sent Events: eventos `progress` a cada etapa e, no fim, `answer` ou `error` |
 
 ```bash
+THREAD=$(curl -s -X POST localhost:8000/conversations | python -c 'import json,sys; print(json.load(sys.stdin)["thread_id"])')
 curl -s localhost:8000/ask -H 'Content-Type: application/json' \
-  -d '{"question": "Qual o número de reclamações não resolvidas por canal?", "thread_id": "demo"}'
+  -d "{\"question\": \"Qual o número de reclamações não resolvidas por canal?\", \"thread_id\": \"$THREAD\"}"
 curl -sN localhost:8000/ask/stream -H 'Content-Type: application/json' \
-  -d '{"question": "E só no Chat?", "thread_id": "demo"}'
+  -d "{\"question\": \"E só no Chat?\", \"thread_id\": \"$THREAD\"}"
 ```
 
-O `thread_id` é opcional; o mesmo valor mantém a conversa. Com `API_KEY` no `.env`, toda rota exceto `/health` exige o cabeçalho `X-API-Key`. A resposta traz nomes e e-mails reais, como a tela; só o LLM e os rastros veem fichas. O LangServe ficou de fora: está descontinuado desde novembro de 2024.
+Sem `thread_id`, a pergunta é avulsa. O `thread_id` é gerado pelo servidor e pertence à chave que abriu a conversa: um id inventado, ou aberto por outra chave, recebe 404. A resposta traz nomes e e-mails reais, como a tela; só o LLM e os rastros veem fichas. O LangServe ficou de fora: está descontinuado desde novembro de 2024.
+
+Acesso:
+
+- Sem `API_KEY`, a API só atende esta máquina e a rede local; de um endereço público, responde 403. O `docker compose` publica as portas só em `127.0.0.1`.
+- Com `API_KEY` no `.env` (uma ou mais, separadas por vírgula), toda rota exceto `/health` exige o cabeçalho `X-API-Key`. Atrás de um proxy reverso todo cliente parece local, então ali a chave é obrigatória.
+- Cada chave e endereço faz até `API_RATE_PER_MIN` perguntas por minuto (padrão 10). Acima disso a resposta é 429 com `Retry-After`.
+- Erros do provedor do LLM chegam ao cliente como mensagem genérica. O texto original fica só no log do servidor.
 
 ## Segurança
 
@@ -212,7 +221,7 @@ src/
   db/tools.py              run_sql com guardrails e descoberta do schema
   semantic/                dicionário de negócio e validação contra o schema
   agent/notices.py         avisos de empate no corte e período incompleto
-  api.py                   API FastAPI (/health, /ask, /ask/stream)
+  api.py                   API FastAPI (/health, /conversations, /ask, /ask/stream)
   llm.py, resilience.py    provedores (AI Studio, Vertex), limitador, fallback, cache, registro de cota
   privacy.py               pseudonimização de nome e e-mail
   progress.py              eventos de progresso da pergunta (etapas, esperas de cota)

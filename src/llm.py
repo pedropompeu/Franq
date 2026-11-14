@@ -6,6 +6,7 @@ Quota handling (cache, rate limiting, retry, fallback across models) lives in
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import warnings
@@ -23,6 +24,8 @@ from src.config import PROJECT_ROOT
 # Free tier (AI Studio, checked 2026-11-12): both 15 RPM / 500 RPD, with separate quotas per model.
 DEFAULT_GEMINI_MODELS = "gemini-3.5-flash-lite:15,gemini-3.1-flash-lite:15"
 DEFAULT_RPM = 5  # conservative when a model is listed without ":rpm"
+
+log = logging.getLogger(__name__)
 
 
 class LLMError(Exception):
@@ -93,7 +96,11 @@ def classify_error(err: BaseException, model: str) -> LLMError:
         return TransientLLMError(f"{model}: erro temporário do provedor")
     if any(marker in text for marker in _TRANSIENT_MARKERS):
         return TransientLLMError(f"{model}: erro temporário do provedor")
-    return LLMError(f"{model}: {type(err).__name__}: {err}")
+    # The provider's own text can echo the request or a credential: it goes to the server log only,
+    # never into the message, which reaches steps, the API and the screen (feedback 2.8).
+    log.warning("%s: provider error: %s", model, text)
+    status = next((c for c in codes if isinstance(c, int)), None)
+    return LLMError(f"{model}: erro do provedor ({f'HTTP {status}' if status else type(err).__name__})")
 
 
 DEFAULT_VERTEX_LOCATION = "southamerica-east1"
@@ -150,7 +157,8 @@ class GeminiLLM:
         parsed = out.get("parsed")
         if out.get("parsing_error") is not None or not isinstance(parsed, BaseModel):
             # Gemini sometimes returns an empty candidate; the same prompt usually works on the next try.
-            raise TransientLLMError(f"{self._model}: resposta vazia ou fora do schema: {out.get('parsing_error')}")
+            log.warning("%s: unusable structured output: %s", self._model, out.get("parsing_error"))
+            raise TransientLLMError(f"{self._model}: resposta vazia ou fora do schema")
         return LLMReply(
             decision=AgentDecision.model_validate(parsed.model_dump()),
             usage=_usage_from(out.get("raw")),

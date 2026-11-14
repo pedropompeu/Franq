@@ -90,6 +90,15 @@ class ConversationStore:
 
     # ------------------------------------------------------------------------------- API
 
+    def open(self, thread_id: str) -> None:
+        """Start an empty conversation, so ``thread_id in store`` holds before its first turn."""
+        with self._guard:
+            self._ensure(thread_id)
+
+    def __contains__(self, thread_id: object) -> bool:
+        with self._guard:
+            return isinstance(thread_id, str) and self._find(thread_id) is not None
+
     def turns(self, thread_id: str) -> list[Turn]:
         """The kept turns of ``thread_id``, oldest first; empty when unknown or expired."""
         with self._guard:

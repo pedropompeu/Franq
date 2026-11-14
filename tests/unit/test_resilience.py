@@ -102,6 +102,25 @@ def test_classify_other_is_plain_llm_error() -> None:
     assert type(out) is LLMError
 
 
+def test_raw_provider_text_is_logged_not_returned(caplog: pytest.LogCaptureFixture) -> None:
+    """The message reaches steps, the API and the screen; the provider's text stays in the log (feedback 2.8)."""
+    err = _ApiError(400, "INVALID_ARGUMENT: API key AIzaSyEXEMPLO not valid; prompt '[nome_3] ...'")
+    with caplog.at_level("WARNING", logger="src.llm"):
+        out = classify_error(err, "m")
+
+    assert "AIza" not in str(out) and "nome_3" not in str(out)
+    assert str(out) == "m: erro do provedor (HTTP 400)"
+    assert "AIzaSyEXEMPLO" in caplog.text
+
+
+def test_schema_error_detail_is_logged_not_returned(caplog: pytest.LogCaptureFixture) -> None:
+    broken = {"raw": AIMessage(content="{"), "parsed": None, "parsing_error": ValueError("trecho '[email_2]'")}
+    with caplog.at_level("WARNING", logger="src.llm"), pytest.raises(TransientLLMError) as raised:
+        _gemini_returning(broken).decide(MESSAGES)
+
+    assert "email_2" not in str(raised.value) and "email_2" in caplog.text
+
+
 def _gemini_returning(*outputs: Mapping[str, object]) -> GeminiLLM:
     """A GeminiLLM whose provider call is replaced by scripted outputs (no SDK client, no network)."""
     script = list(outputs)

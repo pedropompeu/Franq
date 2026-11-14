@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_NAMES = 3
+MIN_RERUN_S = 0.05  # below this the tie rerun would only time out
 MONTHS = (
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
@@ -192,7 +193,10 @@ def period_notices(sql: str, schema: SchemaInfo) -> list[Notice]:
 def compute_notices(sql: str, result: QueryResult, schema: SchemaInfo, settings: Settings) -> list[Notice]:
     """All notices for the final answer. Never raises: a failure means no notice."""
     try:
-        tie = tie_notice(sql, result, settings.db_path, timeout_s=settings.sql_timeout_s)
+        # One deadline for the answer's SQL and its rerun without LIMIT (feedback 2.7): the rerun gets
+        # what the first execution left, and is skipped when that is too little to be worth it.
+        left = settings.sql_timeout_s - result.elapsed_ms / 1000
+        tie = tie_notice(sql, result, settings.db_path, timeout_s=left) if left >= MIN_RERUN_S else None
         return ([tie] if tie else []) + period_notices(sql, schema)
     except Exception as err:
         logger.warning("notices skipped: %s", type(err).__name__)

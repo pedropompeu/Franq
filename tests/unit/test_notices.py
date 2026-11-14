@@ -140,3 +140,25 @@ def test_trace_records_notice_kinds(settings: Settings) -> None:
     Assistant(FakeLLM([query(E2_SQL), answer(E2_SQL, "17.")]), settings, tracer=tracer).ask("WhatsApp 2024?")
     [record] = tracer.tail(1)
     assert record["notices"] == ["partial_period"]
+
+
+def test_tie_rerun_uses_only_what_is_left_of_the_sql_deadline(
+    monkeypatch: pytest.MonkeyPatch, db_path: Path, schema: SchemaInfo
+) -> None:
+    """The main SQL and the tie rerun share one ``SQL_TIMEOUT_S`` (feedback 2.7), not one each."""
+    budgets: list[float] = []
+
+    def spy(sql: str, path: Path, *, max_rows: int, timeout_s: float) -> object:
+        budgets.append(timeout_s)
+        return run_sql(sql, path, max_rows=max_rows, timeout_s=timeout_s)
+
+    monkeypatch.setattr(notices, "run_sql", spy)
+    settings = dataclasses.replace(Settings.from_env(), db_path=db_path, sql_timeout_s=1.0)
+    slow = executed(E1_SQL, db_path).model_copy(update={"elapsed_ms": 700.0})
+    compute_notices(E1_SQL, slow, schema, settings)
+    assert budgets and budgets[0] == pytest.approx(0.3)
+
+    budgets.clear()
+    spent = slow.model_copy(update={"elapsed_ms": 990.0})
+    assert not [n for n in compute_notices(E1_SQL, spent, schema, settings) if n.kind == "tie_at_cut"]
+    assert budgets == []  # nothing left: the rerun does not even start
