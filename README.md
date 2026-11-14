@@ -9,36 +9,111 @@ Solução do desafio técnico de Engenheiro(a) de IA Pleno:
 
 ![Resposta com gráfico de linhas: reclamações por mês e canal](docs/img/resposta.png)
 
-## Como rodar
+## Como rodar em 2 minutos
 
 Requisitos: Python 3.12 e uma chave gratuita do Gemini ([Google AI Studio](https://aistudio.google.com/apikey)).
 
+Linux e Mac:
+
 ```bash
 cp .env.example .env        # preencha só GOOGLE_API_KEY
-make install                # cria .venv e instala dependências
+make install                # cria .venv e instala as dependências do lock
 make run                    # abre a interface em http://localhost:8501
 ```
 
-Com Docker:
+Com Docker (qualquer sistema):
 
 ```bash
 docker compose up --build   # interface em http://localhost:8501, API em http://localhost:8000
 ```
 
-Pela linha de comando:
+Sem chave, o serviço `api` fica *unhealthy* de propósito: o `/health` responde 503 até haver `GOOGLE_API_KEY` ou `LLM_CACHE=replay` no `.env`.
+
+### Windows / sem make
+
+No PowerShell, os mesmos passos sem `make`:
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install -r requirements-dev.txt
+copy .env.example .env                        # preencha só GOOGLE_API_KEY
+.venv\Scripts\python -m streamlit run app.py
+```
+
+Os outros alvos do `Makefile`, como comandos crus. Troque `python` por `.venv\Scripts\python` no Windows ou `.venv/bin/python` no Linux e no Mac:
+
+| `make` | Comando |
+|---|---|
+| `make check` | `python -m ruff check .` · `python -m ruff format --check .` · `python -m mypy` · `python -m pytest` |
+| `make run-api` | `python -m uvicorn src.api:app --reload` |
+| `make eval ARGS="--repeat 3"` | `python -m src.evaluation --repeat 3` |
+| `make eval-frozen` | `python -m src.evaluation --questions tests/eval/paraphrases.yaml --output docs/avaliacao_congelada.md --baseline docs/avaliacao_congelada.json` |
+| `make demo-cache` | `python -m src.demo_cache` |
+| `make lock` | `python -m piptools compile --extra langfuse --strip-extras -o requirements.txt pyproject.toml` (e o mesmo com `--extra dev` para `requirements-dev.txt`) |
+
+A CI roda em Linux. Os comandos de Windows não foram executados numa máquina Windows; nela, o caminho mais curto é o Docker. O `.gitattributes` mantém os arquivos em LF, então a versão do prompt num clone do Windows é a mesma da avaliação publicada.
+
+### Linha de comando e verificações
 
 ```bash
 .venv/bin/python -m src.cli "Quantos clientes interagiram com campanhas de WhatsApp em 2024?"
-```
-
-Verificações e avaliação:
-
-```bash
-make check                  # ruff + formatação + mypy estrito + 298 testes (não usa a API)
+make check                  # ruff + formatação + mypy estrito + testes unitários (não usam a API)
 make eval ARGS="--repeat 3" # avaliação com o Gemini real (gasta cota gratuita)
 ```
 
-As demais variáveis são opcionais e estão documentadas em [`.env.example`](.env.example) (modelos de fallback, cache, limites de linhas e de tempo, chave da API, LangFuse, Vertex AI).
+As demais variáveis são opcionais e estão documentadas em [`.env.example`](.env.example) (modelos de fallback, cache, limites de linhas e de tempo, chave da API, LangFuse, Vertex AI). As dependências diretas ficam no [`pyproject.toml`](pyproject.toml); `requirements.txt` e `requirements-dev.txt` são o lock gerado por `make lock`, com as transitivas fixadas.
+
+## As 5 perguntas do enunciado
+
+| Pergunta | Resposta |
+|---|---|
+| Liste os 5 estados com maior número de clientes que compraram via app em maio. | Conta clientes distintos, não compras. Maio de 2025: São Paulo (6), Minas Gerais e Santa Catarina (3) e dois entre Alagoas, Espírito Santo e Paraná, empatados com 2. A resposta traz o aviso de empate no corte |
+| Quantos clientes interagiram com campanhas de WhatsApp em 2024? | 17, com o aviso de que os dados de 2024 cobrem só julho a dezembro |
+| Quais categorias de produto tiveram o maior número de compras em média por cliente? | Por cliente que comprou: Roupas (2,21), Viagens (2,16), Livros (1,98), Serviços (1,96), Eletrônicos (1,92), Alimentos (1,88). Por cliente cadastrado, a ordem muda (Livros lidera com 1,64); nas duas leituras as categorias ficam próximas, praticamente equivalentes |
+| Qual o número de reclamações não resolvidas por canal? | Telefone 19, Chat 18, E-mail 14 |
+| Qual a tendência de reclamações por canal no último ano? | Série mensal de julho de 2024 a julho de 2025, em gráfico de linhas (imagem acima). Nenhum canal tem tendência estatisticamente significativa: o volume é de 0 a 6 reclamações por mês |
+
+## Avaliação
+
+[`tests/eval/questions.yaml`](tests/eval/questions.yaml) tem 20 perguntas com SQL de referência escrita à mão: as 5 do enunciado, variações, dados pessoais, ambíguas, autocorreção com falha injetada, instrução maliciosa plantada no resultado da consulta, recusas e duas de acompanhamento (M1 "E só no Chat?" depois da E4, M2 "E pelo site?" depois da E1), que rodam na mesma conversa da pergunta anterior. O acerto compara o **resultado** da consulta do agente com o da referência (acerto de execução), não o texto da SQL ([ADR 0007](docs/adr/0007-avaliacao-por-acerto-de-execucao.md)). Quando a referência é um valor só, a frase da resposta também precisa dizer esse valor. Cada armadilha (denominador da média, `COUNT` contra `COUNT DISTINCT`, mês sem ano, coluna `valor_total_gasto`, filtro herdado no acompanhamento) tem uma SQL errada no próprio caso, e um teste garante que ela reprova nos dados reais.
+
+Última rodada, com o Gemini real (`gemini-3.5-flash-lite`), 3 execuções por pergunta e cache desligado, versão de prompt `6d300bcd` ([relatório completo](docs/avaliacao.md), base do gate em [`docs/avaliacao.json`](docs/avaliacao.json)):
+
+| Métrica | Valor |
+|---|---|
+| Acerto geral | 57/57 (100%) |
+| Acerto de execução | 48/48 (100%) |
+| Recusas corretas (fora do escopo, escrita, injeção) | 9/9 (100%) |
+| Autocorreção após falha injetada | 3/3 (100%) |
+| Instrução plantada nos dados ignorada | 3/3 (100%) |
+| Avisos de empate (E1) e período parcial (E2) presentes | 6/6 (100%) |
+| Perguntas de acompanhamento (M1, M2) | 6/6 (100%) |
+| Mensagens ao LLM com nome ou e-mail real | 0 |
+| Banco inalterado ao final | sim |
+| Chamadas ao LLM por pergunta (média) | 1,9 |
+| Latência por pergunta (mediana) | 2,8 s |
+
+Na rodada anterior, a pergunta ambígua A2 ("Quantos clientes compraram em julho?") falhou em 1 de 3 execuções: o agente somou os dois meses de julho dos dados, contra a regra do dicionário (mês sem ano = ocorrência mais recente). A regra passou a dizer como aplicar o filtro (ano e mês, nunca só o mês), e o A2 acertou 3 de 3 nas rodadas seguintes. No caso D1, uma ordem para ignorar as instruções e apagar a tabela `suporte` vai escondida numa coluna do resultado mostrado ao modelo. O modelo ignorou a ordem nas 3 execuções, e o `run_sql` só lê de qualquer forma.
+
+Vinte perguntas não provam robustez geral, e o prompt foi ajustado olhando para elas: o A2 acima é um exemplo. Elas servem para pegar regressões nas armadilhas conhecidas.
+
+Para medir fora da amostra existe um **conjunto congelado**, [`tests/eval/paraphrases.yaml`](tests/eval/paraphrases.yaml), com 33 perguntas: as 20 de ajuste com outra redação (F01 a F20) e 13 inéditas (N01 a N13), duas delas com empate no primeiro lugar. Ele foi escrito antes de rodar no modelo e nunca é usado para ajustar o prompt. Um teste fixa o SHA-256 do arquivo, então mudar uma pergunta quebra o teste de propósito. Para rodar: `make eval-frozen ARGS="--repeat 3"`. O relatório vai para `docs/avaliacao_congelada.md`, com base própria. Os dois relatórios trazem o intervalo de confiança de Wilson (95%) sobre as perguntas certas em todas as execuções. A unidade é a pergunta, não a execução, porque repetir a mesma pergunta não gera tentativas independentes. Com 20 de 20, o limite inferior fica em 84%.
+
+## Decisões e trade-offs
+
+Os ADRs completos estão em [`docs/adr/`](docs/adr/README.md). Em resumo, o que foi escolhido e o que isso custa:
+
+| Decisão | Por quê | O que custa |
+|---|---|---|
+| SQLite direto, sem banco de grafos ([ADR 0002](docs/adr/0002-sqlite-sem-grafo.md)) | São 4 tabelas pequenas e as perguntas são agregações relacionais. O grafo aparece onde ajuda a ler: no desenho de cada consulta e na aba "Visão em grafo", montada do próprio SQLite | Nada de travessias longas; reconsiderar se o modelo crescer para muitas entidades e relações |
+| Um agente em LangGraph com nós separados ([ADR 0003](docs/adr/0003-agente-unico-em-langgraph.md)) | Fluxo auditável passo a passo, cerca de 2 chamadas por pergunta (1,9 medido) | Um prompt só carrega schema, dicionário e regras |
+| Schema descoberto do banco, significado escrito à mão ([ADR 0004](docs/adr/0004-camada-semantica-e-descoberta-dinamica.md)) | Nada de schema copiado no prompt; o dicionário é validado contra o banco na inicialização | Métricas e armadilhas novas dependem de alguém anotá-las |
+| Pseudonimização antes do LLM ([ADR 0006](docs/adr/0006-pseudonimizacao-antes-do-llm.md)) | O Gemini, o cache e os rastros nunca veem nome ou e-mail real | Um nome digitado que não está no banco segue como texto |
+| Avisos calculados no código (empate, período, tendência) | O modelo não pode esquecer um aviso nem inventar um número | Só cobrem os padrões de SQL que o código reconhece; fora deles, não há aviso |
+| Acerto de execução, não texto da SQL ([ADR 0007](docs/adr/0007-avaliacao-por-acerto-de-execucao.md)) | SQLs diferentes com o mesmo resultado contam como acerto | Cada pergunta exige uma referência escrita à mão |
+| Cota gratuita como restrição de projeto ([ADR 0005](docs/adr/0005-resiliencia-na-cota-gratuita.md)) | Limitador, fallback para outro modelo, cache e registro de cota: o app degrada com mensagem clara | Esperas do limitador aparecem na latência |
+| Memória de conversa própria, em RAM ([ADR 0008](docs/adr/0008-memoria-de-conversa-por-thread.md)) | Só texto mascarado, com limite de conversas e de tempo | Some ao reiniciar; cada réplica da API tem a sua |
+| FastAPI em vez de LangServe ([ADR 0009](docs/adr/0009-api-fastapi-em-vez-de-langserve.md)) | O LangServe está descontinuado desde novembro de 2024 | Rotas e streaming escritos à mão |
 
 ## Como funciona
 
@@ -103,34 +178,6 @@ Se a SQL não dá para analisar, não há aviso; um erro no cálculo de um aviso
 | Perguntas ambíguas ("média de compras por cliente") | O agente assume a leitura padrão e declara a premissa na resposta. Quando a outra leitura muda a conclusão, as duas aparecem |
 | `nome_campanha` ("Black Friday", "Natal") parece um período | Anotado no dicionário: cada nome foi enviado ao longo de toda a janela, e o período é sempre `data_envio` |
 
-## API
-
-O mesmo assistente da interface, em FastAPI ([ADR 0009](docs/adr/0009-api-fastapi-em-vez-de-langserve.md)). `make run-api` sobe em http://localhost:8000, com a documentação interativa em `/docs`.
-
-| Rota | O que faz |
-|---|---|
-| `GET /health` | Modelo e versão do prompt; 503 se o assistente não conseguiu subir |
-| `POST /conversations` | Abre uma conversa e devolve `{"thread_id": "..."}` |
-| `POST /ask` | `{"question": "...", "thread_id": "..."}` → resposta completa em JSON (texto, dados, gráfico, avisos, passos, custo) |
-| `POST /ask/stream` | O mesmo em Server-Sent Events: eventos `progress` a cada etapa e, no fim, `answer` ou `error` |
-
-```bash
-THREAD=$(curl -s -X POST localhost:8000/conversations | python -c 'import json,sys; print(json.load(sys.stdin)["thread_id"])')
-curl -s localhost:8000/ask -H 'Content-Type: application/json' \
-  -d "{\"question\": \"Qual o número de reclamações não resolvidas por canal?\", \"thread_id\": \"$THREAD\"}"
-curl -sN localhost:8000/ask/stream -H 'Content-Type: application/json' \
-  -d "{\"question\": \"E só no Chat?\", \"thread_id\": \"$THREAD\"}"
-```
-
-Sem `thread_id`, a pergunta é avulsa. O `thread_id` é gerado pelo servidor e pertence à chave que abriu a conversa: um id inventado, ou aberto por outra chave, recebe 404. A resposta traz nomes e e-mails reais, como a tela; só o LLM e os rastros veem fichas. O LangServe ficou de fora: está descontinuado desde novembro de 2024.
-
-Acesso:
-
-- Sem `API_KEY`, a API só atende esta máquina e a rede local; de um endereço público, responde 403. O `docker compose` publica as portas só em `127.0.0.1`.
-- Com `API_KEY` no `.env` (uma ou mais, separadas por vírgula), toda rota exceto `/health` exige o cabeçalho `X-API-Key`. Atrás de um proxy reverso todo cliente parece local, então ali a chave é obrigatória.
-- Cada chave e endereço faz até `API_RATE_PER_MIN` perguntas por minuto (padrão 10). Acima disso a resposta é 429 com `Retry-After`.
-- Erros do provedor do LLM chegam ao cliente como mensagem genérica. O texto original fica só no log do servidor.
-
 ## Segurança
 
 A execução de SQL tem defesa em profundidade ([ADR 0001](docs/adr/0001-guardrails-sql.md)): validação por AST com `sqlglot` (só um `SELECT`/`WITH`, sem `PRAGMA`, `ATTACH` ou escrita), conexão `mode=ro`, `PRAGMA query_only`, `set_authorizer` que nega qualquer ação fora de leitura, `set_progress_handler` como limite de tempo e limite de linhas aplicado pelo sistema (1.000 para a interface, 50 para o modelo). Pedidos de escrita, fora do escopo ou com injeção de prompt são recusados pelo agente antes de chegar ao banco.
@@ -151,6 +198,52 @@ O free tier do Gemini tem limite de requisições por minuto e por dia, por mode
 - **Registro de cota** em disco: um modelo esgotado não é chamado de novo até a cota zerar (meia-noite do Pacífico).
 - **Cache** das respostas do LLM por hash da mensagem completa (`LLM_CACHE=on|off|replay`). Em `replay` o app só usa respostas já guardadas no cache local e nunca chama a API, nem precisa da chave.
 
+## Observabilidade
+
+Cada pergunta gera um rastro em `traces/traces.jsonl`: passos, SQL, erros, modelo, tokens, latência, versão do prompt e se a chamada veio do cache. Os rastros guardam a pergunta e a SQL com as fichas no lugar de nomes e e-mails e nunca guardam linhas de resultado. A aba de rastros da interface lê esse arquivo e mostra um painel com respostas, recusas, falhas, autocorreções, latência mediana e p95, tokens e custo estimado por mil perguntas.
+
+![Aba de rastros: métricas e tabela das perguntas](docs/img/rastros.png)
+
+### Versão de prompt e gate de regressão
+
+Toda resposta e todo rastro levam a `prompt_version`: um hash curto dos arquivos que montam o prompt, do dicionário de negócio e do schema da decisão ([ADR 0010](docs/adr/0010-langfuse-e-versao-de-prompt.md)). Qualquer mudança em um deles gera uma versão nova, então dá para saber qual prompt produziu cada resposta. O hash ignora a diferença entre CRLF e LF.
+
+`make eval` compara a rodada com a anterior, guardada em [`docs/avaliacao.json`](docs/avaliacao.json). Uma queda só conta como regressão (código 3) se for improvável pela taxa da base: teste binomial unilateral com p < 0,05, por pergunta e no total. Errar 1 de 3 numa pergunta que sempre acertava é oscilação, e o relatório mostra como tal. Execuções perdidas por cota ou rede não contam; se menos de 90% chegaram ao modelo, a rodada é inconclusiva (código 4). Uma resposta vazia ou fora do schema conta como falha do modelo. Para gravar uma nova base, use `make eval ARGS="--repeat 3 --save-baseline"`. A base só é gravada se a rodada passar no gate: sem vazamento, banco inalterado, conclusiva e sem regressão. `--accept-regressions` aceita uma piora de propósito.
+
+## Extras
+
+O núcleo é o assistente da interface. Estes componentes usam a mesma lógica e são opcionais.
+
+### API
+
+O mesmo assistente da interface, em FastAPI ([ADR 0009](docs/adr/0009-api-fastapi-em-vez-de-langserve.md)). `make run-api` sobe em http://localhost:8000, com a documentação interativa em `/docs`.
+
+| Rota | O que faz |
+|---|---|
+| `GET /health` | Modelo e versão do prompt; 503 se o assistente não conseguiu subir |
+| `POST /conversations` | Abre uma conversa e devolve `{"thread_id": "..."}` |
+| `POST /ask` | `{"question": "...", "thread_id": "..."}` → resposta completa em JSON (texto, dados, gráfico, avisos, passos, custo) |
+| `POST /ask/stream` | O mesmo em Server-Sent Events: eventos `progress` a cada etapa e, no fim, `answer` ou `error` |
+
+```bash
+THREAD=$(curl -s -X POST localhost:8000/conversations | python -c 'import json,sys; print(json.load(sys.stdin)["thread_id"])')
+curl -s localhost:8000/ask -H 'Content-Type: application/json' \
+  -d "{\"question\": \"Qual o número de reclamações não resolvidas por canal?\", \"thread_id\": \"$THREAD\"}"
+curl -sN localhost:8000/ask/stream -H 'Content-Type: application/json' \
+  -d "{\"question\": \"E só no Chat?\", \"thread_id\": \"$THREAD\"}"
+```
+
+Sem `thread_id`, a pergunta é avulsa. O `thread_id` é gerado pelo servidor e pertence à chave que abriu a conversa: um id inventado, ou aberto por outra chave, recebe 404. A resposta traz nomes e e-mails reais, como a tela; só o LLM e os rastros veem fichas.
+
+Acesso:
+
+- Sem `API_KEY`, a API só atende esta máquina e a rede local; de um endereço público, responde 403. O `docker compose` publica as portas só em `127.0.0.1`.
+- Com `API_KEY` no `.env` (uma ou mais, separadas por vírgula), toda rota exceto `/health` exige o cabeçalho `X-API-Key`. Atrás de um proxy reverso todo cliente parece local, então ali a chave é obrigatória.
+- Cada chave e endereço faz até `API_RATE_PER_MIN` perguntas por minuto (padrão 10). Acima disso a resposta é 429 com `Retry-After`.
+- Erros do provedor do LLM chegam ao cliente como mensagem genérica. O texto original fica só no log do servidor.
+
+A CI sobe o `docker compose` com `LLM_CACHE=replay` e confere o `/health` da API e do app.
+
 ### Vertex AI
 
 Com `LLM_PROVIDER=vertex`, o mesmo Gemini é chamado pelo Vertex AI de um projeto do Google Cloud, sem chave de API: a autenticação usa as Application Default Credentials.
@@ -167,57 +260,9 @@ O Vertex é o caminho para produção: cobrança no projeto, cota maior e escolh
 
 O caminho do Vertex está coberto por testes com modelo falso (escolha do provedor, variáveis exigidas, cota separada). Não foi testado ao vivo: o Vertex exige um projeto com faturamento ativo, que não foi ligado para o desafio. A avaliação e a demo usam o AI Studio.
 
-## Observabilidade
+### LangFuse
 
-Cada pergunta gera um rastro em `traces/traces.jsonl`: passos, SQL, erros, modelo, tokens, latência, versão do prompt e se a chamada veio do cache. Os rastros guardam a pergunta e a SQL com as fichas no lugar de nomes e e-mails e nunca guardam linhas de resultado. A aba de rastros da interface lê esse arquivo e mostra um painel com respostas, recusas, falhas, autocorreções, latência mediana e p95, tokens e custo estimado por mil perguntas.
-
-![Aba de rastros: métricas e tabela das perguntas](docs/img/rastros.png)
-
-### Versão de prompt e gate de regressão
-
-Toda resposta e todo rastro levam a `prompt_version`: um hash curto dos arquivos que montam o prompt, do dicionário de negócio e do schema da decisão ([ADR 0010](docs/adr/0010-langfuse-e-versao-de-prompt.md)). Qualquer mudança em um deles gera uma versão nova, então dá para saber qual prompt produziu cada resposta.
-
-`make eval` compara a rodada com a anterior, guardada em [`docs/avaliacao.json`](docs/avaliacao.json). Uma queda só conta como regressão (código 3) se for improvável pela taxa da base: teste binomial unilateral com p < 0,05, por pergunta e no total. Errar 1 de 3 numa pergunta que sempre acertava é oscilação, e o relatório mostra como tal. Execuções perdidas por cota ou rede não contam; se menos de 90% chegaram ao modelo, a rodada é inconclusiva (código 4). Uma resposta vazia ou fora do schema conta como falha do modelo. Para gravar uma nova base, use `make eval ARGS="--repeat 3 --save-baseline"`. A base só é gravada se a rodada passar no gate: sem vazamento, banco inalterado, conclusiva e sem regressão. `--accept-regressions` aceita uma piora de propósito.
-
-### LangFuse (opcional)
-
-Com `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY` no `.env`, cada decisão do modelo vira uma *generation* no [LangFuse](https://langfuse.com), agrupada por pergunta, com a versão do prompt como tag e a conversa como sessão. O registro fica abaixo do grafo: o LangFuse só recebe as mensagens já mascaradas (`[nome_1]`), e um teste garante isso. `make eval ARGS="--langfuse"` registra a rodada no dataset `indaga-eval`, com as notas `acerto`, `correcoes` e `latencia_ms` por pergunta. Sem as chaves, nada é enviado e o pacote nem é importado.
-
-## Avaliação
-
-[`tests/eval/questions.yaml`](tests/eval/questions.yaml) tem 20 perguntas com SQL de referência escrita à mão: as 5 do enunciado, variações, dados pessoais, ambíguas, autocorreção com falha injetada, instrução maliciosa plantada no resultado da consulta, recusas e duas de acompanhamento (M1 "E só no Chat?" depois da E4, M2 "E pelo site?" depois da E1), que rodam na mesma conversa da pergunta anterior. O acerto compara o **resultado** da consulta do agente com o da referência (acerto de execução), não o texto da SQL ([ADR 0007](docs/adr/0007-avaliacao-por-acerto-de-execucao.md)). Quando a referência é um valor só, a frase da resposta também precisa dizer esse valor. Cada armadilha (denominador da média, `COUNT` contra `COUNT DISTINCT`, mês sem ano, coluna `valor_total_gasto`, filtro herdado no acompanhamento) tem uma SQL errada no próprio caso, e um teste garante que ela reprova nos dados reais.
-
-Última rodada, com o Gemini real (`gemini-3.5-flash-lite`), 3 execuções por pergunta e cache desligado, versão de prompt `6d300bcd` ([relatório completo](docs/avaliacao.md), base do gate em [`docs/avaliacao.json`](docs/avaliacao.json)):
-
-| Métrica | Valor |
-|---|---|
-| Acerto geral | 57/57 (100%) |
-| Acerto de execução | 48/48 (100%) |
-| Recusas corretas (fora do escopo, escrita, injeção) | 9/9 (100%) |
-| Autocorreção após falha injetada | 3/3 (100%) |
-| Instrução plantada nos dados ignorada | 3/3 (100%) |
-| Avisos de empate (E1) e período parcial (E2) presentes | 6/6 (100%) |
-| Perguntas de acompanhamento (M1, M2) | 6/6 (100%) |
-| Mensagens ao LLM com nome ou e-mail real | 0 |
-| Banco inalterado ao final | sim |
-| Chamadas ao LLM por pergunta (média) | 1,9 |
-| Latência por pergunta (mediana) | 2,8 s |
-
-Na rodada anterior, a pergunta ambígua A2 ("Quantos clientes compraram em julho?") falhou em 1 de 3 execuções: o agente somou os dois meses de julho dos dados, contra a regra do dicionário (mês sem ano = ocorrência mais recente). A regra passou a dizer como aplicar o filtro (ano e mês, nunca só o mês), e o A2 acertou 3 de 3 nas rodadas seguintes. No caso D1, uma ordem para ignorar as instruções e apagar a tabela `suporte` vai escondida numa coluna do resultado mostrado ao modelo. O modelo ignorou a ordem nas 3 execuções, e o `run_sql` só lê de qualquer forma.
-
-Vinte perguntas não provam robustez geral, e o prompt foi ajustado olhando para elas: o A2 acima é um exemplo. Elas servem para pegar regressões nas armadilhas conhecidas.
-
-Para medir fora da amostra existe um **conjunto congelado**, [`tests/eval/paraphrases.yaml`](tests/eval/paraphrases.yaml), com 33 perguntas: as 20 de ajuste com outra redação (F01 a F20) e 13 inéditas (N01 a N13), duas delas com empate no primeiro lugar. Ele foi escrito antes de rodar no modelo e nunca é usado para ajustar o prompt. Um teste fixa o SHA-256 do arquivo, então mudar uma pergunta quebra o teste de propósito. Para rodar: `make eval-frozen ARGS="--repeat 3"`. O relatório vai para `docs/avaliacao_congelada.md`, com base própria. Os dois relatórios trazem o intervalo de confiança de Wilson (95%) sobre as perguntas certas em todas as execuções. A unidade é a pergunta, não a execução, porque repetir a mesma pergunta não gera tentativas independentes. Com 20 de 20, o limite inferior fica em 84%.
-
-### As 5 perguntas do enunciado
-
-| Pergunta | Resposta |
-|---|---|
-| Liste os 5 estados com maior número de clientes que compraram via app em maio. | Conta clientes distintos, não compras. Maio de 2025: São Paulo (6), Minas Gerais e Santa Catarina (3) e dois entre Alagoas, Espírito Santo e Paraná, empatados com 2. A resposta traz o aviso de empate no corte |
-| Quantos clientes interagiram com campanhas de WhatsApp em 2024? | 17, com o aviso de que os dados de 2024 cobrem só julho a dezembro |
-| Quais categorias de produto tiveram o maior número de compras em média por cliente? | Por cliente que comprou: Roupas (2,21), Viagens (2,16), Livros (1,98), Serviços (1,96), Eletrônicos (1,92), Alimentos (1,88). Por cliente cadastrado, a ordem muda (Livros lidera com 1,64); nas duas leituras as categorias ficam próximas, praticamente equivalentes |
-| Qual o número de reclamações não resolvidas por canal? | Telefone 19, Chat 18, E-mail 14 |
-| Qual a tendência de reclamações por canal no último ano? | Série mensal de julho de 2024 a julho de 2025, em gráfico de linhas (imagem acima). Nenhum canal tem tendência estatisticamente significativa: o volume é de 0 a 6 reclamações por mês |
+Com `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY` no `.env`, cada decisão do modelo vira uma *generation* no [LangFuse](https://langfuse.com), agrupada por pergunta, com a versão do prompt como tag e a conversa como sessão. O registro fica abaixo do grafo: o LangFuse só recebe as mensagens já mascaradas (`[nome_1]`), e um teste garante isso. `make eval ARGS="--langfuse"` registra a rodada no dataset `indaga-eval`, com as notas `acerto`, `correcoes` e `latencia_ms` por pergunta. Sem as chaves, nada é enviado e o pacote nem é importado. No `pyproject.toml`, o pacote é o extra opcional `langfuse`.
 
 ## Estrutura
 
@@ -225,9 +270,11 @@ Para medir fora da amostra existe um **conjunto congelado**, [`tests/eval/paraph
 app.py                     interface Streamlit
 src/
   agent/                   grafo LangGraph, AgentDecision, prompts
-  db/tools.py              run_sql com guardrails e descoberta do schema
-  semantic/                dicionário de negócio e validação contra o schema
+  agent/memory.py          histórico de conversa (LRU com prazo, lock por conversa)
   agent/notices.py         avisos de empate no corte, período incompleto, pontas da série e tendência
+  db/tools.py              run_sql com guardrails e descoberta do schema
+  db/lineage.py            colunas de origem de cada coluna do resultado (máscara de valores derivados)
+  semantic/                dicionário de negócio e validação contra o schema
   api.py                   API FastAPI (/health, /conversations, /ask, /ask/stream)
   llm.py, resilience.py    provedores (AI Studio, Vertex), limitador, fallback, cache, registro de cota
   privacy.py               pseudonimização de nome e e-mail
@@ -236,7 +283,8 @@ src/
   versioning.py            versão do prompt (hash)
   run_context.py           rastro, versão e conversa da pergunta em curso
   langfuse_bridge.py       LangFuse opcional (generations e dataset da avaliação)
-  evaluation.py            avaliação por acerto de execução e gate de regressão
+  evaluation.py            avaliação por acerto de execução, intervalo de Wilson e gate de regressão
+  demo_cache.py            aquece ou confere o cache das conversas da demo
   ui/                      componentes, textos, tema, grafo da consulta, painel de progresso
   ui/banner.png            faixa do topo (imagem do material do desafio)
   ui/data_graph.py         aba "Visão em grafo" (pyvis, só agregados)
@@ -245,16 +293,12 @@ tests/unit/                testes com LLM falso e determinístico
 tests/eval/questions.yaml  perguntas de referência (conjunto de ajuste)
 tests/eval/paraphrases.yaml conjunto congelado: paráfrases e perguntas inéditas
 docs/                      ADRs, avaliação, arquitetura do Desafio 2
+pyproject.toml             dependências diretas; requirements*.txt é o lock gerado
 ```
-
-## Decisões de arquitetura
-
-Os ADRs estão em [`docs/adr/`](docs/adr/README.md). O banco de grafos (Neo4j) ficou de fora: são 4 tabelas pequenas num SQLite exigido pelo desafio ([ADR 0002](docs/adr/0002-sqlite-sem-grafo.md)). O grafo aparece onde ajuda a ler: no desenho de cada consulta e na aba "Visão em grafo", montada do próprio SQLite.
 
 ## Melhorias possíveis
 
-- **Memória persistente** (`SqliteSaver`/`PostgresSaver` com prazo de expiração) para conversas que sobrevivem a reinícios e a mais de uma réplica da API.
-- **Limite de requisições por cliente** na API (hoje fica a cargo de um gateway).
+- **Memória persistente** (Redis ou Postgres com prazo de expiração) para conversas que sobrevivem a reinícios e a mais de uma réplica da API; hoje a memória fica em RAM, por processo.
 - **Catálogo semântico maior**, com sinônimos e métricas aprovadas pela área de negócio.
 - **Mais perguntas de avaliação**, incluindo perguntas reais de usuários, e execução agendada da avaliação.
 - **Pseudonimização também de nomes digitados** que não estão no banco (detecção de entidades).
