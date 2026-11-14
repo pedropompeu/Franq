@@ -314,6 +314,25 @@ def test_injected_fault_makes_the_model_correct_itself(settings: Settings) -> No
     assert "coluna_inexistente" in llm.prompts[1]  # the model is shown the real SQLite error
 
 
+def test_fault_is_injected_when_the_model_skips_straight_to_the_final_answer(settings: Settings) -> None:
+    """A final answer with a SQL not run yet is run by the agent: that first query is corrupted too.
+
+    Live run of G33 (2026-11-14): the model answered at once, the agent ran its SQL, the injector
+    only watched ``run_query`` and the case "failed to correct" a fault that never happened.
+    """
+    privacy = Pseudonymizer()
+    cases = [c for c in load_cases() if c.id == "C1"]
+    good = "SELECT categoria, SUM(valor) AS total FROM compras GROUP BY categoria"
+    llm = FakeLLM([answer(good, "Totais."), answer(good, "Totais."), answer(good, "Totais por categoria.")])
+
+    def factory(guarded: StructuredLLM) -> Assistant:
+        return Assistant(guarded, settings, privacy=privacy)
+
+    run = run_evaluation(cases, factory, llm, settings, privacy).runs[0]
+    assert run.passed and run.corrections == 1
+    assert "coluna_inexistente" in llm.prompts[1]
+
+
 def test_fault_is_not_injected_when_the_case_does_not_ask(settings: Settings) -> None:
     privacy = Pseudonymizer()
     cases = [c for c in load_cases() if c.id == "E2"]

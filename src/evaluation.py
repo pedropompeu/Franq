@@ -365,7 +365,8 @@ def plant_instruction(text: str) -> str:
 class FaultInjector:
     """Test doubles around the real model, switched on per case.
 
-    ``armed`` corrupts the first query the model proposes, then gets out of the way.
+    ``armed`` corrupts the first SQL the model proposes (to run or as its final answer), then gets
+    out of the way.
     ``planting`` adds an instruction to every query result shown to the model.
     """
 
@@ -383,7 +384,8 @@ class FaultInjector:
             messages = [m.model_copy(update={"content": plant_instruction(str(m.content))}) for m in messages]
         reply = self.inner.decide(messages)
         decision = reply.decision
-        if not (self.armed and decision.action == "run_query" and decision.sql.strip()):
+        # a final answer whose SQL was not run yet is run by the agent, so it is the first query too
+        if not (self.armed and decision.action in ("run_query", "final_answer") and decision.sql.strip()):
             return reply
         self.armed = False
         return dataclasses.replace(reply, decision=decision.model_copy(update={"sql": inject_fault(decision.sql)}))
