@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage
 
 from src import evaluation
 from src.agent.graph import Assistant
-from src.agent.models import AgentDecision, AgentResponse, Notice
+from src.agent.models import AgentDecision, AgentResponse, Notice, Step
 from src.config import Settings
 from src.db.tools import QueryResult
 from src.evaluation import (
@@ -33,6 +33,7 @@ from src.evaluation import (
     result_matches,
     run_evaluation,
     run_reference,
+    states_value,
     write_baseline,
 )
 from src.llm import StructuredLLM
@@ -96,12 +97,109 @@ def test_ranking_rejects_wrong_size_wrong_top_or_unknown_rows() -> None:
     assert not result_matches((["estado", "n"], [["SP", 6], ["RJ", 3]]), ranking, top2)
 
 
+def test_numbers_tolerate_float_noise_and_rounding_to_two_decimals() -> None:
+    noisy = (["taxa"], [[0.12500000000000003]])
+    assert result_matches((["t"], [[0.125]]), noisy, case())
+    assert result_matches((["t"], [[0.13]]), noisy, case())  # ROUND(x, 2) in SQLite rounds half up
+    assert result_matches((["t"], [[0.12]]), noisy, case())
+    assert not result_matches((["t"], [[0.14]]), noisy, case())
+
+
+def test_single_value_reference_rejects_extra_numeric_columns() -> None:
+    ref = (["clientes"], [[17]])
+    assert not result_matches((["receberam", "interagiram"], [[33, 17]]), ref, case())
+    assert not result_matches((["resolvidas", "nao_resolvidas"], [[16, 17]]), ref, case())
+    assert result_matches((["canal", "clientes"], [["WhatsApp", 17]]), ref, case())  # a label is fine
+
+
+def test_ranking_accepts_every_row_tied_at_the_cut() -> None:
+    ranking = (["estado", "n"], [["SP", 6], ["MG", 3], ["AL", 2], ["ES", 2], ["PR", 2], ["BA", 1]])
+    top3 = case("ranking", rank_by=1, k=3)
+    assert result_matches((["estado", "n"], [["SP", 6], ["MG", 3], ["AL", 2], ["ES", 2], ["PR", 2]]), ranking, top3)
+    assert result_matches((["estado", "n"], [["SP", 6], ["MG", 3], ["AL", 2], ["PR", 2]]), ranking, top3)
+    tied_and_one_more = [["SP", 6], ["MG", 3], ["AL", 2], ["ES", 2], ["PR", 2], ["BA", 1]]
+    assert not result_matches((["estado", "n"], tied_and_one_more), ranking, top3)
+
+
+def test_month_numbers_match_year_month_labels_of_one_year() -> None:
+    ref = (["mes", "n"], [["2025-01", 10], ["2025-02", 12]])
+    assert result_matches((["mes", "n"], [["01", 10], ["02", 12]]), ref, case())
+    assert result_matches((["mes", "n"], [[1, 10], [2, 12]]), ref, case())
+    assert not result_matches((["mes", "n"], [["01", 12], ["02", 10]]), ref, case())
+    two_years = (["mes", "n"], [["2024-12", 10], ["2025-01", 12]])
+    assert not result_matches((["mes", "n"], [["12", 10], ["01", 12]]), two_years, case())  # which year?
+
+
 def test_ranking_without_k_accepts_any_prefix() -> None:
     ranking = (["categoria", "media"], [["Roupas", 2.21], ["Viagens", 2.16], ["Livros", 1.98]])
     any_k = case("ranking", rank_by=1)
     assert result_matches((["categoria", "media"], [["Roupas", 2.21]]), ranking, any_k)
     assert result_matches(ranking, ranking, any_k)
     assert not result_matches((["categoria", "media"], [["Viagens", 2.16]]), ranking, any_k)
+
+
+# ---------------------------------------------------------------- answer text
+
+
+@pytest.mark.parametrize(
+    ("text", "value", "stated"),
+    [
+        ("17 clientes interagiram.", 17.0, True),
+        ("Foram 33 clientes.", 17.0, False),
+        ("Dos 33 que receberam, 17 interagiram.", 17.0, True),
+        ("A média é 2,21 compras por cliente.", 2.2112676, True),
+        ("Cerca de 2,2 compras.", 2.2112676, True),
+        ("Cerca de 2 compras.", 2.2112676, False),  # a fraction needs at least one decimal
+        ("Ticket médio de R$ 1.234,56.", 1234.5612, True),
+        ("Ticket médio de 1234.56.", 1234.5612, True),
+        ("Taxa de 12,5% de interação.", 0.125, True),
+        ("O e-mail é Ana@Exemplo.com.", "ana@exemplo.com", True),
+        ("Não encontrei.", "ana@exemplo.com", False),
+    ],
+)
+def test_answer_text_states_the_value(text: str, value: Any, stated: bool) -> None:
+    assert states_value(text, value) is stated
+
+
+def _single(answer_text: str) -> dict[str, bool]:
+    data = QueryResult(sql="SELECT 1", columns=["n"], rows=[[17]], row_count=1, truncated=False, elapsed_ms=1)
+    response = AgentResponse(question="?", status="answered", answer=answer_text, data=data)
+    return evaluate_response(case(reference=["SELECT 17"]), response, [(["n"], [[17]])], Pseudonymizer(), 0)
+
+
+def test_right_query_with_a_wrong_number_in_the_answer_fails() -> None:
+    assert _single("São 17 clientes.")["answer_text"]
+    checks = _single("São 33 clientes.")
+    assert checks["result"] and not checks["answer_text"]
+    assert evaluation.CHECK_LABEL["answer_text"] == "valor no texto da resposta"
+
+
+def test_table_references_do_not_check_the_answer_text() -> None:
+    data = QueryResult(sql="SELECT 1", columns=REF[0], rows=REF[1], row_count=3, truncated=False, elapsed_ms=1)
+    response = AgentResponse(question="?", status="answered", answer="Chat lidera.", data=data)
+    assert "answer_text" not in evaluate_response(case(reference=["x"]), response, [REF], Pseudonymizer(), 0)
+
+
+def test_premise_must_name_the_ambiguous_point() -> None:
+    a1 = case(assumption=True, assumption_terms=["compraram", "cadastrad"])
+    base = AgentResponse(question="?", status="answered", answer="2,21.")
+    vague = base.model_copy(update={"assumptions": ["Considerei a categoria Roupas."]})
+    clear = base.model_copy(update={"assumptions": ["Denominador: clientes que COMPRARAM Roupas."]})
+    assert not evaluate_response(a1, vague, [], Pseudonymizer(), 0)["assumption"]
+    assert evaluate_response(a1, clear, [], Pseudonymizer(), 0)["assumption"]
+    assert evaluate_response(case(assumption=True), vague, [], Pseudonymizer(), 0)["assumption"]
+
+
+def _llm_error_checks(error: str) -> dict[str, bool]:
+    step = Step(index=1, kind="llm_error", error=error)
+    response = AgentResponse(question="?", status="failed", answer="Não consegui.", steps=[step])
+    return evaluate_response(case(), response, [], Pseudonymizer(), 0)
+
+
+def test_out_of_schema_reply_is_the_models_failure_not_infrastructure() -> None:
+    assert _llm_error_checks("gemini-x: erro do provedor (HTTP 503)")["llm"] is False
+    checks = _llm_error_checks("nenhum modelo disponível: a: resposta vazia ou fora do schema | b: cota")
+    assert "llm" not in checks and checks["status"] is False
 
 
 # ---------------------------------------------------------------- question file
@@ -120,6 +218,21 @@ def test_question_file_is_valid_and_every_reference_runs(db_path: Path) -> None:
             assert rows, f"{c.id}: reference returned no rows"
             if c.match == "ranking":
                 assert 0 <= c.rank_by < len(columns)
+
+
+def test_every_trap_is_real_in_the_data(db_path: Path) -> None:
+    """A trap SQL must give a result that the comparator rejects, or the case tests nothing."""
+    cases = [c for c in load_cases() if c.traps]
+    assert {"A1", "A2", "P1", "V4", "M1"} <= {c.id for c in cases}
+    for c in cases:
+        references = [run_reference(db_path, sql) for sql in c.reference]
+        for trap in c.traps:
+            wrong = run_reference(db_path, trap)
+            assert not any(result_matches(wrong, ref, c) for ref in references), f"{c.id}: trap matches"
+
+
+def test_ambiguous_cases_name_the_point_to_declare() -> None:
+    assert all(c.assumption_terms for c in load_cases() if c.kind == "ambigua")
 
 
 def test_question_file_has_no_personal_data(db_path: Path) -> None:
@@ -178,7 +291,7 @@ def test_wrong_result_and_missing_premise_fail(settings: Settings) -> None:
 
     run = run_evaluation(cases, factory, llm, settings, privacy).runs[0]
     assert not run.passed
-    assert run.failed_checks == ["resultado", "premissa"]
+    assert run.failed_checks == ["resultado", "valor no texto da resposta", "premissa"]
 
 
 def test_injected_fault_makes_the_model_correct_itself(settings: Settings) -> None:
@@ -316,11 +429,29 @@ def test_baseline_round_trip(tmp_path: Path) -> None:
     assert compare_baseline(report, stored) == []
 
 
-def test_regression_detected_when_pass_rate_drops(tmp_path: Path) -> None:
+def test_one_miss_in_three_is_noise_but_a_consistent_break_is_a_regression(tmp_path: Path) -> None:
     path = tmp_path / "avaliacao.json"
     write_baseline(_report(("E1", True), ("E1", True), ("E1", True), repeat=3), path)
-    after = _report(("E1", True), ("E1", False), ("E1", True), repeat=3)
-    assert compare_baseline(after, json.loads(path.read_text(encoding="utf-8"))) == [Regression("E1", 1.0, 0.667)]
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    one_miss = compare_baseline(_report(("E1", True), ("E1", False), ("E1", True), repeat=3), stored)
+    assert [(r.case_id, r.after, r.significant) for r in one_miss] == [("E1", 0.667, False), ("todas", 0.667, False)]
+    broken = compare_baseline(_report(("E1", False), ("E1", False), ("E1", False), repeat=3), stored)
+    assert [(r.case_id, r.significant) for r in broken] == [("E1", True), ("todas", True)]
+    assert broken[0].p_value == pytest.approx(0.2**3)  # baseline 3/3 smoothed to 4/5
+
+
+def test_many_small_drops_add_up_to_a_regression_over_all_questions() -> None:
+    ids = [f"Q{i}" for i in range(10)]
+    baseline = {"cases": {i: {"passed": 3, "runs": 3} for i in ids}}
+    runs = [(i, not (n == 0 and i in ids[:4])) for i in ids for n in range(3)]  # 4 questions miss once
+    drops = compare_baseline(_report(*runs, repeat=3), baseline)
+    assert not any(r.significant for r in drops if r.case_id != "todas")
+    assert [r.case_id for r in drops if r.significant] == ["todas"]
+
+
+def test_binomial_cdf() -> None:
+    assert evaluation.binomial_cdf(0, 3, 0.8) == pytest.approx(0.008)
+    assert evaluation.binomial_cdf(3, 3, 0.8) == pytest.approx(1.0)
 
 
 def test_baseline_compares_common_cases_only() -> None:
@@ -330,22 +461,53 @@ def test_baseline_compares_common_cases_only() -> None:
 
 def test_report_shows_prompt_version_and_comparison() -> None:
     report = _report(("E1", False))
-    text = render_report(report, [Regression("E1", 1.0, 0.0)])
+    text = render_report(report, [Regression("E1", 1.0, 0.0, 0.008), Regression("E2", 1.0, 0.667, 0.488)])
     assert "prompt `abcd1234`" in text
-    assert "## Comparação com a rodada anterior" in text and "| E1 | 100% | 0% |" in text
+    assert "## Comparação com a rodada anterior" in text
+    assert "| E1 | 100% | 0% | 0,008 | **regressão** |" in text and "| E2 | 100% | 67% | 0,488 | oscilação |" in text
     assert "## Comparação com a rodada anterior" not in render_report(report)
+
+
+ALWAYS = (("E1", True), ("E1", True), ("E1", True))
+NEVER = (("E1", False), ("E1", False), ("E1", False))
 
 
 def test_main_exits_3_on_regression(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     baseline = tmp_path / "avaliacao.json"
-    write_baseline(_report(("E1", True)), baseline)
+    write_baseline(_report(*ALWAYS, repeat=3), baseline)
     monkeypatch.setenv("LLM_CACHE", "off")
     monkeypatch.setattr(evaluation, "get_llm", lambda: FakeLLM([]))
-    monkeypatch.setattr(evaluation, "run_evaluation", lambda *_a, **_k: _report(("E1", False)))
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda *_a, **_k: _report(*NEVER, repeat=3))
     out = tmp_path / "r.md"
     assert evaluation.main(["--only", "E1", "--baseline", str(baseline), "--output", str(out)]) == 3
-    assert "| E1 | 100% | 0% |" in out.read_text(encoding="utf-8")
+    assert "| E1 | 100% | 0% | 0,008 | **regressão** |" in out.read_text(encoding="utf-8")
     assert evaluation.main(["--only", "E1", "--no-baseline", "--output", str(out)]) == 0
+
+
+def test_main_does_not_save_a_baseline_over_a_regression(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline = tmp_path / "avaliacao.json"
+    write_baseline(_report(*ALWAYS, repeat=3), baseline)
+    monkeypatch.setattr(evaluation, "get_llm", lambda: FakeLLM([]))
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda *_a, **_k: _report(*NEVER, repeat=3))
+    args = ["--baseline", str(baseline), "--output", str(tmp_path / "r.md"), "--save-baseline"]
+    assert evaluation.main(args) == 3
+    assert json.loads(baseline.read_text(encoding="utf-8"))["cases"] == {"E1": {"passed": 3, "runs": 3}}
+    assert evaluation.main([*args, "--accept-regressions"]) == 0
+    assert json.loads(baseline.read_text(encoding="utf-8"))["cases"] == {"E1": {"passed": 0, "runs": 3}}
+
+
+def test_main_exits_4_when_too_few_runs_reached_the_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    report = dataclasses.replace(_report(), runs=[_llm_failure("E1"), _llm_failure("E2")])
+    baseline = tmp_path / "avaliacao.json"
+    monkeypatch.setattr(evaluation, "get_llm", lambda: FakeLLM([]))
+    monkeypatch.setattr(evaluation, "run_evaluation", lambda *_a, **_k: report)
+    out = tmp_path / "r.md"
+    assert evaluation.main(["--baseline", str(baseline), "--output", str(out), "--save-baseline"]) == 4
+    assert not baseline.exists()
+    assert "Rodada inconclusiva" in out.read_text(encoding="utf-8")
+    nine_of_ten = dataclasses.replace(_report(*[(f"Q{i}", True) for i in range(9)]))
+    nine_of_ten = dataclasses.replace(nine_of_ten, runs=[*nine_of_ten.runs, _llm_failure("Q9")])
+    assert not evaluation.inconclusive(nine_of_ten)
 
 
 def test_main_saves_baseline_only_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

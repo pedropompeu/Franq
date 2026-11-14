@@ -44,6 +44,11 @@ class TransientLLMError(LLMError):
     """Timeouts and 5xx: worth retrying with backoff."""
 
 
+# An empty or out-of-schema reply is retried like a transient error, but it did reach the model:
+# the evaluation counts it as the model's failure, not as infrastructure (feedback 2026-11-14, 4.3).
+SCHEMA_ERROR = "resposta vazia ou fora do schema"
+
+
 @dataclass(frozen=True)
 class LLMReply:
     decision: AgentDecision
@@ -158,7 +163,7 @@ class GeminiLLM:
         if out.get("parsing_error") is not None or not isinstance(parsed, BaseModel):
             # Gemini sometimes returns an empty candidate; the same prompt usually works on the next try.
             log.warning("%s: unusable structured output: %s", self._model, out.get("parsing_error"))
-            raise TransientLLMError(f"{self._model}: resposta vazia ou fora do schema")
+            raise TransientLLMError(f"{self._model}: {SCHEMA_ERROR}")
         return LLMReply(
             decision=AgentDecision.model_validate(parsed.model_dump()),
             usage=_usage_from(out.get("raw")),

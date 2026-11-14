@@ -1,8 +1,13 @@
 """Automatic evaluation with the real LLM: ``python -m src.evaluation`` (or ``make eval``).
 
 Execution accuracy: the agent's query result is compared with the result of a hand-written
-reference SQL (``tests/eval/questions.yaml``), never the SQL text or the answer wording.
-Extra columns and column order are ignored; numbers are compared with 2 decimals.
+reference SQL (``tests/eval/questions.yaml``), never the SQL text. Extra columns and column
+order are ignored, except that a single-value reference accepts one numeric column only.
+Numbers match within 0.005 (an answer rounded to 2 decimals still matches), and ``'YYYY-MM'``
+labels of a single year also match bare month numbers (``'01'``, ``1``).
+
+When the reference is a single value, the answer text has to state it too: a right query
+with a wrong number in the sentence fails (feedback 2026-11-14, 4.1).
 
 Besides accuracy, every run checks the guarantees the app promises:
 
@@ -17,8 +22,13 @@ Besides accuracy, every run checks the guarantees the app promises:
   partial period);
 - the database file is byte-for-byte unchanged at the end.
 
-A run is compared with the stored baseline (``docs/avaliacao.json``): if a question's pass rate
-drops, the exit code is 3. ``--save-baseline`` stores the current run as the new baseline.
+A run is compared with the stored baseline (``docs/avaliacao.json``). A drop counts as a
+regression only when it is unlikely under the baseline's rate (one-sided binomial test, p < 0.05,
+per question and over all questions); a single miss in three runs of a question that always
+passed is noise, not a regression. Exit codes: 1 serious failure (leak, database changed),
+3 regression, 4 inconclusive (too few runs reached the model). ``--save-baseline`` stores the
+current run as the new baseline only when it passes the gate (``--accept-regressions`` overrides
+a regression on purpose).
 
 The report (Markdown) holds metrics, question templates and masked SQL only: no result rows
 and no personal data. Runs with ``LLM_CACHE=off`` by default, so it measures the model, not
@@ -32,6 +42,7 @@ import dataclasses
 import hashlib
 import itertools
 import json
+import math
 import os
 import re
 import sqlite3
@@ -54,7 +65,7 @@ from src.agent.graph import Assistant
 from src.agent.models import AgentResponse, NoticeKind
 from src.config import PROJECT_ROOT, Settings, load_env_file
 from src.langfuse_bridge import DatasetSink, langfuse_dataset_sink
-from src.llm import LLMReply, StructuredLLM, get_llm
+from src.llm import SCHEMA_ERROR, LLMReply, StructuredLLM, get_llm
 from src.observability import Tracer
 from src.privacy import TOKEN, Pseudonymizer, load_pseudonymizer
 from src.semantic.dictionary import load_dictionary
@@ -89,6 +100,7 @@ CHECK_LABEL = {
     "corrected": "autocorreção",
     "resisted": "obedeceu à instrução nos dados",
     "notice": "aviso",
+    "answer_text": "valor no texto da resposta",
     "llm": "erro do LLM",
 }
 
@@ -103,10 +115,12 @@ class EvalCase(BaseModel):
     rank_by: int = 0
     k: int | None = None
     assumption: bool = False
+    assumption_terms: list[str] = Field(default_factory=list)  # the premise must name one of these
     inject_fault: bool = False
     plant_instruction: bool = False
     expect_notice: NoticeKind | None = None
     context: list[str] = Field(default_factory=list)  # earlier questions in the same thread
+    traps: list[str] = Field(default_factory=list)  # wrong SQLs the case exists to catch (unit-tested)
 
     @property
     def needs_result(self) -> bool:
@@ -121,13 +135,19 @@ def load_cases(path: Path = QUESTIONS_PATH) -> list[EvalCase]:
 # ------------------------------------------------------------------ comparison
 
 
+TOLERANCE = 0.005 + 1e-9  # a value rounded to 2 decimals still matches; float noise always does
+_NUMBER_TEXT = re.compile(r"^-?\d+(?:\.\d+)?$")
+_YEAR_MONTH = re.compile(r"^(\d{4})-(\d{2})$")
+
+
 def normalize(value: Any) -> Any:
     if isinstance(value, bool):
         return float(value)
     if isinstance(value, int | float):
-        return round(float(value), 2) + 0.0  # + 0.0 turns -0.0 into 0.0
+        return float(value) + 0.0  # + 0.0 turns -0.0 into 0.0
     if isinstance(value, str):
-        return value.strip()
+        text = value.strip()
+        return float(text) + 0.0 if _NUMBER_TEXT.match(text) else text  # '01' from strftime('%m')
     return value
 
 
@@ -139,17 +159,73 @@ def _sort_key(value: Any) -> tuple[int, Any]:
     return (0, value) if isinstance(value, float) else (1, str(value))
 
 
+def _same(a: Any, b: Any) -> bool:
+    if isinstance(a, float) and isinstance(b, float):
+        return math.isclose(a, b, rel_tol=1e-9, abs_tol=TOLERANCE)
+    return bool(a == b)
+
+
+def _same_values(got: Sequence[Any], want: Sequence[Any]) -> bool:
+    """Same multiset of single values (sorted pairing is exact for a 1-D tolerance)."""
+    if len(got) != len(want):
+        return False
+    return all(_same(a, b) for a, b in zip(sorted(got, key=_sort_key), sorted(want, key=_sort_key), strict=True))
+
+
+def _leftover(agent: list[tuple[Any, ...]], ref: list[tuple[Any, ...]]) -> list[tuple[Any, ...]] | None:
+    """Reference rows left after pairing each agent row with one of them; None if some row has no pair."""
+    left = list(ref)
+    for row in agent:
+        for i, candidate in enumerate(left):
+            if all(_same(a, b) for a, b in zip(row, candidate, strict=True)):
+                del left[i]
+                break
+        else:
+            return None
+    return left
+
+
 def _matches(agent: list[tuple[Any, ...]], ref: list[tuple[Any, ...]], case: EvalCase) -> bool:
     if case.match == "ordered":
-        return agent == ref
+        return len(agent) == len(ref) and all(
+            _same(a, b) for x, y in zip(agent, ref, strict=True) for a, b in zip(x, y, strict=True)
+        )
     if case.match == "set":
-        return Counter(agent) == Counter(ref)
-    # ranking: agent rows belong to the full ranking and carry its k largest values
-    if not agent or (case.k is not None and len(agent) != case.k) or Counter(agent) - Counter(ref):
+        return len(agent) == len(ref) and _leftover(agent, ref) == []
+    # ranking: agent rows belong to the full ranking and carry its largest values; rows past k are
+    # accepted only when they tie with the k-th (listing every tied row is a right answer too)
+    k = case.k
+    if not agent or (k is not None and len(agent) < k) or _leftover(agent, ref) is None:
         return False
-    top = sorted((r[case.rank_by] for r in ref), key=_sort_key, reverse=True)[: len(agent)]
     got = sorted((r[case.rank_by] for r in agent), key=_sort_key, reverse=True)
-    return got == top
+    top = sorted((r[case.rank_by] for r in ref), key=_sort_key, reverse=True)[: len(got)]
+    if not all(_same(a, b) for a, b in zip(got, top, strict=True)):
+        return False
+    return k is None or all(_same(v, got[k - 1]) for v in got[k:])
+
+
+def _without_year(rows: list[tuple[Any, ...]]) -> list[tuple[Any, ...]] | None:
+    """The rows with single-year ``'YYYY-MM'`` columns turned into month numbers; None if there are none."""
+    if not rows:
+        return None
+    columns = [list(c) for c in zip(*rows, strict=True)]
+    changed = False
+    for i, values in enumerate(columns):
+        found = [_YEAR_MONTH.match(v) if isinstance(v, str) else None for v in values]
+        if all(found) and len({m.group(1) for m in found if m}) == 1:
+            columns[i] = [float(m.group(2)) for m in found if m]
+            changed = True
+    return [tuple(r) for r in zip(*columns, strict=True)] if changed else None
+
+
+def _numeric_columns(rows: list[tuple[Any, ...]], width: int) -> int:
+    return sum(1 for i in range(width) if rows and all(isinstance(r[i], float) for r in rows))
+
+
+def single_value(reference: Table) -> Any | None:
+    """The reference's only cell, or None when it has more than one."""
+    columns, rows = reference
+    return normalize(rows[0][0]) if len(columns) == 1 and len(rows) == 1 else None
 
 
 def result_matches(agent: Table, reference: Table, case: EvalCase) -> bool:
@@ -160,16 +236,55 @@ def result_matches(agent: Table, reference: Table, case: EvalCase) -> bool:
         return False
     if case.match != "ranking" and len(agent_rows) != len(ref_rows):
         return False
-    ref_columns = [Counter(r[i] for r in ref_rows) for i in range(n_ref)]
-    for mapping in itertools.permutations(range(n_agent), n_ref):
-        if case.match != "ranking" and any(
-            Counter(r[j] for r in agent_rows) != ref_columns[i] for i, j in enumerate(mapping)
-        ):
-            continue  # cheap per-column check before projecting whole rows
-        projected = [tuple(row[j] for j in mapping) for row in agent_rows]
-        if _matches(projected, ref_rows, case):
-            return True
+    if isinstance(single_value(reference), float) and _numeric_columns(agent_rows, n_agent) > 1:
+        return False  # (received=33, interacted=17) for "how many interacted": which one is the answer?
+    stripped = _without_year(ref_rows)
+    for ref in [ref_rows] if stripped is None else [ref_rows, stripped]:
+        ref_columns = [[r[i] for r in ref] for i in range(n_ref)]
+        for mapping in itertools.permutations(range(n_agent), n_ref):
+            if case.match != "ranking" and not all(
+                _same_values([r[j] for r in agent_rows], ref_columns[i]) for i, j in enumerate(mapping)
+            ):
+                continue  # cheap per-column check before pairing whole rows
+            projected = [tuple(row[j] for j in mapping) for row in agent_rows]
+            if _matches(projected, ref, case):
+                return True
     return False
+
+
+_TEXT_NUMBER = re.compile(r"(?<![\w.,])-?\d{1,3}(?:\.\d{3})+(?:,\d+)?%?|(?<![\w.,])-?\d+(?:[.,]\d+)?%?")
+
+
+def _text_numbers(text: str) -> list[tuple[float, int]]:
+    """Numbers written in ``text`` (pt-BR or plain), with how many decimals were shown; % counts /100."""
+    found = []
+    for raw in _TEXT_NUMBER.findall(text):
+        percent = raw.endswith("%")
+        token = raw.rstrip("%")
+        if "," in token:
+            token = token.replace(".", "").replace(",", ".")
+        elif re.fullmatch(r"-?\d{1,3}(?:\.\d{3})+", token):
+            token = token.replace(".", "")  # 1.234 is a thousands separator in pt-BR
+        decimals = len(token.partition(".")[2])
+        value = float(token)
+        found.append((value, decimals))
+        if percent:
+            found.append((value / 100, decimals + 2))
+    return found
+
+
+def states_value(text: str, value: Any) -> bool:
+    """True if ``text`` states ``value``: a number up to the decimals it shows, a text as a substring.
+
+    A fractional value needs at least one decimal in the text ("9" does not state 9.46).
+    """
+    if isinstance(value, float):
+        whole = math.isclose(value, round(value), abs_tol=1e-9)
+        return any(
+            abs(number - value) <= 0.5 * 10**-decimals + 1e-9 and (whole or decimals >= 1)
+            for number, decimals in _text_numbers(text)
+        )
+    return str(value).casefold() in text.casefold()
 
 
 def run_reference(db_path: Path, sql: str) -> Table:
@@ -303,8 +418,14 @@ def evaluate_response(
         data = response.data
         agent: Table | None = (data.columns, data.rows) if data is not None else None
         checks["result"] = agent is not None and any(result_matches(agent, ref, case) for ref in references)
+        values = [single_value(ref) for ref in references]
+        if values and all(v is not None for v in values):
+            checks["answer_text"] = any(states_value(response.answer, v) for v in values)
     if case.assumption:
-        checks["assumption"] = bool(response.assumptions)
+        premise = " ".join(response.assumptions).casefold()
+        checks["assumption"] = bool(response.assumptions) and (
+            not case.assumption_terms or any(t.casefold() in premise for t in case.assumption_terms)
+        )
     if case.inject_fault:
         checks["corrected"] = response.corrections >= 1 and response.status == "answered"
     shown = " ".join([response.answer, *response.assumptions])
@@ -322,8 +443,10 @@ def evaluate_response(
         checks["notice"] = case.expect_notice in kinds or all_tied
     checks["no_leak"] = leaks == 0
     checks["no_token"] = not any(m.group(0) in privacy.to_value for m in TOKEN.finditer(shown))
-    if any(s.kind == "llm_error" for s in response.steps):
+    errors = [s.error or "" for s in response.steps if s.kind == "llm_error"]
+    if errors and not any(SCHEMA_ERROR in e for e in errors):
         checks["llm"] = False  # quota or network: not a model mistake, reported apart
+    # an empty or out-of-schema reply did reach the model: it counts as the model's failure
     return checks
 
 
@@ -395,11 +518,45 @@ def _pct(part: int, total: int) -> str:
 # ------------------------------------------------------------------ baseline
 
 
+ALPHA = 0.05  # a drop is a regression when it would happen by chance less than 5% of the time
+MIN_REACHED = 0.9  # below this share of runs reaching the model, the run is inconclusive
+ALL_CASES = "todas"
+
+
 @dataclass(frozen=True)
 class Regression:
-    case_id: str
+    case_id: str  # ALL_CASES for the drop over every question in common
     before: float  # pass rate in the baseline
     after: float  # pass rate in this run
+    p_value: float = 0.0
+
+    @property
+    def significant(self) -> bool:
+        return self.p_value < ALPHA
+
+
+def binomial_cdf(x: int, n: int, p: float) -> float:
+    """P(X <= x) for X ~ Binomial(n, p)."""
+    return min(1.0, sum(math.comb(n, i) * p**i * (1 - p) ** (n - i) for i in range(x + 1)))
+
+
+def drop_p_value(before_passed: int, before_runs: int, passed: int, runs: int) -> float:
+    """How likely ``passed`` out of ``runs`` (or fewer) is if the baseline's rate still held.
+
+    The baseline rate is smoothed (Laplace: (passed + 1) / (runs + 2)): 3 out of 3 is evidence of
+    a high rate, not proof of 100%, so one miss in three runs is not enough to call a regression.
+    """
+    return binomial_cdf(passed, runs, (before_passed + 1) / (before_runs + 2))
+
+
+def reached_model(report: EvalReport) -> tuple[int, int]:
+    """(runs that reached the model, all runs): quota and network losses are left out."""
+    return sum(1 for r in report.runs if r.checks.get("llm", True)), len(report.runs)
+
+
+def inconclusive(report: EvalReport, min_reached: float = MIN_REACHED) -> bool:
+    reached, total = reached_model(report)
+    return total == 0 or reached < min_reached * total
 
 
 def _rate(passed: int, runs: int) -> float:
@@ -440,17 +597,25 @@ def write_baseline(report: EvalReport, path: Path, *, merge: bool = False) -> No
 
 
 def compare_baseline(report: EvalReport, baseline: dict[str, Any]) -> list[Regression]:
-    """Questions present in both whose pass rate dropped."""
+    """Every drop in pass rate (per question and over all questions in common), with its p-value.
+
+    Only the ``significant`` ones fail the gate; the others are shown as noise.
+    """
     stored = baseline.get("cases", {})
-    regressions = []
+    drops: list[Regression] = []
+    totals = [0, 0, 0, 0]  # baseline passed, baseline runs, passed, runs
     for case_id, (passed, runs) in _model_counts(report).items():
         if case_id not in stored:
             continue
-        before = _rate(int(stored[case_id]["passed"]), int(stored[case_id]["runs"]))
-        after = _rate(passed, runs)
+        b_passed, b_runs = int(stored[case_id]["passed"]), int(stored[case_id]["runs"])
+        totals = [t + v for t, v in zip(totals, (b_passed, b_runs, passed, runs), strict=True)]
+        before, after = _rate(b_passed, b_runs), _rate(passed, runs)
         if after < before:
-            regressions.append(Regression(case_id, before, after))
-    return regressions
+            drops.append(Regression(case_id, before, after, drop_p_value(b_passed, b_runs, passed, runs)))
+    before, after = _rate(totals[0], totals[1]), _rate(totals[2], totals[3])
+    if after < before:
+        drops.append(Regression(ALL_CASES, before, after, drop_p_value(*totals)))
+    return drops
 
 
 def _comparison(regressions: list[Regression], baseline: dict[str, Any] | None) -> list[str]:
@@ -463,8 +628,18 @@ def _comparison(regressions: list[Regression], baseline: dict[str, Any] | None) 
         ]
     if not regressions:
         return [*lines, "Nenhuma pergunta piorou.", ""]
-    lines += ["| ID | Antes | Depois |", "|---|---|---|"]
-    lines += [f"| {r.case_id} | {r.before:.0%} | {r.after:.0%} |" for r in regressions]
+    lines += [
+        f"Regressão = queda com p < {_num(ALPHA, 2)} (binomial unilateral contra a taxa da base, suavizada). "
+        "Quedas acima disso são oscilação.",
+        "",
+        "| ID | Antes | Depois | p | Veredito |",
+        "|---|---|---|---|---|",
+    ]
+    lines += [
+        f"| {r.case_id} | {r.before:.0%} | {r.after:.0%} | {_num(r.p_value, 3)} | "
+        f"{'**regressão**' if r.significant else 'oscilação'} |"
+        for r in regressions
+    ]
     return [*lines, ""]
 
 
@@ -478,9 +653,19 @@ def render_report(
     injected = [r for r in runs if r.case.inject_fault]
     planted = [r for r in runs if r.case.plant_instruction]
     llm_errors = sum(1 for r in runs if "llm" in r.checks)
+    reached, total = reached_model(report)
     lines = [
         "# Avaliação automática",
         "",
+    ]
+    if inconclusive(report):
+        lines += [
+            f"> **Rodada inconclusiva:** só {reached} de {total} execuções chegaram ao modelo "
+            f"(mínimo {MIN_REACHED:.0%}). O resto foi perdido para cota ou rede, então esta rodada "
+            "não mede o modelo nem serve de base.",
+            "",
+        ]
+    lines += [
         f"Gerado por `python -m src.evaluation` em {report.started:%Y-%m-%d %H:%M}. "
         f"Modelos: `{report.models}` · cache do LLM: `{report.cache_mode}` · "
         f"{report.repeat} {'execução' if report.repeat == 1 else 'execuções'} por pergunta · "
@@ -510,6 +695,7 @@ def render_report(
     ]
     if llm_errors:
         lines.append(f"| Execuções com erro do LLM (cota ou rede) | {llm_errors} |")
+    lines.append(f"| Execuções que chegaram ao modelo | {_pct(reached, total)} |")
     lines += [
         "",
         "## Por pergunta",
@@ -617,6 +803,17 @@ def main(argv: list[str] | None = None) -> int:
         help="gravar esta rodada como a nova base (com --only, atualiza só essas perguntas)",
     )
     parser.add_argument(
+        "--accept-regressions",
+        action="store_true",
+        help="com --save-baseline, grava a base mesmo com regressão (mudança aceita de propósito)",
+    )
+    parser.add_argument(
+        "--min-reached",
+        type=float,
+        default=MIN_REACHED,
+        help=f"fração mínima de execuções que precisam chegar ao modelo (padrão: {MIN_REACHED})",
+    )
+    parser.add_argument(
         "--langfuse", action="store_true", help="registrar a rodada como execução de dataset no LangFuse"
     )
     args = parser.parse_args(argv)
@@ -664,18 +861,28 @@ def main(argv: list[str] | None = None) -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(render_report(report, regressions, baseline), encoding="utf-8")
     print(f"\nRelatório: {args.output}")
+    not_saved = "Base NÃO gravada" if args.save_baseline else ""
     leaks = sum(r.leaks for r in report.runs)
     if leaks or not report.db_unchanged:
         print("FALHA GRAVE: vazamento de dado pessoal ou banco alterado.", file=sys.stderr)
-        if args.save_baseline:
-            print("Base NÃO gravada: uma rodada com falha grave não serve de referência.", file=sys.stderr)
+        if not_saved:
+            print(f"{not_saved}: uma rodada com falha grave não serve de referência.", file=sys.stderr)
         return 1
+    if inconclusive(report, args.min_reached):
+        reached, total = reached_model(report)
+        print(f"INCONCLUSIVA: só {reached} de {total} execuções chegaram ao modelo (cota ou rede).", file=sys.stderr)
+        if not_saved:
+            print(f"{not_saved}: a rodada não mediu o modelo.", file=sys.stderr)
+        return 4
+    significant = [r for r in regressions or [] if r.significant]
+    if significant and not (args.save_baseline and args.accept_regressions):
+        print(f"REGRESSÃO em relação à rodada anterior: {', '.join(r.case_id for r in significant)}.", file=sys.stderr)
+        if not_saved:
+            print(f"{not_saved}: use --accept-regressions se a piora é de propósito.", file=sys.stderr)
+        return 3
     if args.save_baseline:
         write_baseline(report, args.baseline, merge=bool(args.only))
         print(f"Base gravada: {args.baseline}")
-    if regressions:
-        print(f"REGRESSÃO em relação à rodada anterior: {', '.join(r.case_id for r in regressions)}.", file=sys.stderr)
-        return 3
     return 0
 
 

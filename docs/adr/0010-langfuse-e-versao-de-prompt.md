@@ -1,6 +1,6 @@
 # ADR 0010 — Versão de prompt, gate de regressão e LangFuse opcional
 
-- **Status:** aceito (2026-11-13)
+- **Status:** aceito (2026-11-13), gate revisto em 2026-11-14
 
 ## Contexto
 
@@ -16,11 +16,12 @@ O comportamento do agente depende do prompt, do dicionário de negócio e do sch
 
 A versão vai em toda resposta (`AgentResponse.prompt_version`), em todo rastro, no `/health` da API e no cabeçalho do relatório de avaliação. Hashear os arquivos inteiros é grosseiro de propósito: uma edição de comentário também muda a versão, o que custa uma rodada de avaliação, nunca uma resposta com versão errada.
 
-**Gate de regressão.** `make eval` compara a rodada com `docs/avaliacao.json` (taxa de acerto por pergunta) e sai com código **3** se alguma pergunta piorou (o 1 continua reservado para vazamento de dado pessoal ou banco alterado).
+**Gate de regressão.** `make eval` compara a rodada com `docs/avaliacao.json` (taxa de acerto por pergunta). Uma queda é regressão, código **3**, quando é improvável pela taxa da base: teste binomial unilateral, p < 0,05, por pergunta e no total das perguntas em comum. A taxa da base é suavizada por Laplace, (acertos + 1) / (execuções + 2), porque 3 de 3 indica taxa alta, não prova 100%. O código 1 continua reservado para vazamento de dado pessoal ou banco alterado.
 
-- Execuções perdidas por cota ou rede não contam como regressão nem entram na base.
+- Execuções perdidas por cota ou rede não contam como regressão nem entram na base. Se menos de 90% das execuções chegaram ao modelo, a rodada é inconclusiva (código **4**).
+- Uma resposta vazia ou fora do schema chegou ao modelo e conta como falha dele, não de infraestrutura.
 - `--save-baseline` grava a rodada como nova base; com `--only`, atualiza só as perguntas rodadas.
-- Uma rodada com vazamento ou banco alterado nunca vira base.
+- A base só é gravada depois do gate: uma rodada com vazamento, banco alterado, inconclusiva ou com regressão nunca vira base. `--accept-regressions` aceita uma piora de propósito.
 
 **LangFuse opcional.** Sem `LANGFUSE_PUBLIC_KEY` e `LANGFUSE_SECRET_KEY`, nada é enviado e o pacote `langfuse` nem é importado. Com elas:
 
@@ -33,7 +34,8 @@ A versão vai em toda resposta (`AgentResponse.prompt_version`), em todo rastro,
 
 - Uma dependência nova, aprovada antes: `langfuse==5.2.0`.
 - Um teste garante que nenhuma mensagem enviada ao LangFuse contém nome ou e-mail real.
-- O gate com `--repeat 1` pode acusar uma regressão falsa numa pergunta instável; a base é gravada com `--repeat 3`.
+- Com `--repeat 1`, uma pergunta sozinha nunca é regressão significativa; só o total pega uma piora espalhada. A base é gravada com `--repeat 3`.
+- As repetições de uma pergunta são correlacionadas, então o teste no total trata como independentes execuções que não são. Ele é um filtro de ruído, não uma estimativa de acerto.
 - Chamadas que falham (cota, rede) não aparecem no LangFuse; aparecem nos rastros JSONL.
 
 ## Alternativas descartadas
@@ -42,3 +44,7 @@ A versão vai em toda resposta (`AgentResponse.prompt_version`), em todo rastro,
 - **Versão manual do prompt (número no código):** depende de alguém lembrar de mudar.
 - **Hash só do texto do `SYSTEM_PROMPT`:** deixava de fora a nota de conversa, a janela de histórico, a nota de privacidade e o modelo de mensagem.
 - **LangSmith:** serviço pago fora do que a vaga cita; o LangFuse tem plano gratuito e pode rodar no próprio ambiente.
+
+## Histórico
+
+- [2026-11-13] Qualquer queda na taxa de uma pergunta saía com código 3; uma rodada só com erros de LLM saía com 0; `--save-baseline` gravava antes de checar regressão; resposta fora do schema contava como infraestrutura. ~superseded 2026-11-14 pela decisão acima, após a auditoria externa de 2026-11-14 (item 4.3).

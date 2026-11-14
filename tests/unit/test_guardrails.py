@@ -101,6 +101,8 @@ def test_execution_error_is_returned_as_data(db_path: Path) -> None:
 
 
 def test_timeout_aborts_runaway_query(db_path: Path) -> None:
+    # The query never ends, so the only possible outcome is the timeout: a slow machine makes the
+    # test take longer, never pass or fail by luck (feedback 2026-11-14, 4.6).
     runaway = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT COUNT(*) FROM r"
     outcome = run_sql(runaway, db_path, timeout_s=0.2)
     assert isinstance(outcome, QueryError)
