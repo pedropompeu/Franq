@@ -50,3 +50,26 @@ def test_a_question_out_of_the_cache_counts_as_failure(settings: Settings) -> No
     failures = run(Assistant(llm, settings), [("Primeira?",), ("Segunda?",)], lambda _: None)
 
     assert failures == 1
+
+
+def test_published_demo_cache_answers_every_demo_question(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The "sem chave" path: ``demo/llm-cache`` replays the whole demo without the Gemini API.
+
+    Failing here means the prompt changed: run ``LLM_CACHE=on make demo-cache``, audit the new
+    files for personal data and copy them to ``demo/llm-cache``.
+    """
+    from src.config import PROJECT_ROOT
+    from src.llm import get_llm
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("LLM_CACHE", "replay")
+    monkeypatch.setenv("LLM_CACHE_DIR", str(PROJECT_ROOT / "demo" / "llm-cache"))
+    for name in ("GEMINI_MODELS", "GEMINI_MODEL", "GOOGLE_API_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_PUBLIC_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    settings = dataclasses.replace(Settings.from_env(), trace_path=tmp_path / "traces.jsonl")
+    lines: list[str] = []
+
+    failures = run(Assistant(get_llm(), settings), demo_conversations(), lines.append)
+
+    assert failures == 0, lines
+    assert len(lines) == sum(len(c) for c in demo_conversations())

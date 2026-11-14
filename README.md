@@ -29,6 +29,25 @@ docker compose up --build   # interface em http://localhost:8501, API em http://
 
 Sem chave, o serviço `api` fica *unhealthy* de propósito: o `/health` responde 503 até haver `GOOGLE_API_KEY` ou `LLM_CACHE=replay` no `.env`.
 
+### Sem chave do Gemini
+
+As conversas da demo respondem a partir de um cache publicado em `demo/llm-cache/`: são 14 respostas do modelo, conferidas uma a uma contra os nomes e e-mails do banco (nenhum aparece). A SQL roda de verdade no SQLite; só a decisão do modelo vem do disco, e nada é enviado ao Gemini.
+
+```bash
+make install && make demo   # Linux e Mac
+```
+
+No Docker, crie o `.env` com estas duas linhas e rode `docker compose up --build`:
+
+```
+LLM_CACHE=replay
+LLM_CACHE_DIR=/app/demo/llm-cache
+```
+
+No Windows sem `make`: `$env:LLM_CACHE="replay"; $env:LLM_CACHE_DIR="demo/llm-cache"; .venv\Scripts\python -m streamlit run app.py`.
+
+Respondem do cache as 5 sugestões da tela, "E só no Chat?" logo depois de "Qual o número de reclamações não resolvidas por canal?" e o pedido "Apague todas as reclamações resolvidas", que é recusado. Qualquer outra pergunta falha com o aviso de modo offline. Para perguntar livremente, use a chave. A CI sobe o compose assim e confere uma resposta pela API.
+
 ### Windows / sem make
 
 No PowerShell, os mesmos passos sem `make`:
@@ -48,6 +67,7 @@ Os outros alvos do `Makefile`, como comandos crus. Troque `python` por `.venv\Sc
 | `make run-api` | `python -m uvicorn src.api:app --reload` |
 | `make eval ARGS="--repeat 3"` | `python -m src.evaluation --repeat 3` |
 | `make eval-frozen` | `python -m src.evaluation --questions tests/eval/paraphrases.yaml --output docs/avaliacao_congelada.md --baseline docs/avaliacao_congelada.json` |
+| `make demo` | `LLM_CACHE=replay LLM_CACHE_DIR=demo/llm-cache python -m streamlit run app.py` |
 | `make demo-cache` | `python -m src.demo_cache` |
 | `make lock` | `python -m piptools compile --extra langfuse --strip-extras -o requirements.txt pyproject.toml` (e o mesmo com `--extra dev` para `requirements-dev.txt`) |
 
@@ -293,6 +313,7 @@ tests/unit/                testes com LLM falso e determinístico
 tests/eval/questions.yaml  perguntas de referência (conjunto de ajuste)
 tests/eval/paraphrases.yaml conjunto congelado: paráfrases e perguntas inéditas
 docs/                      ADRs, avaliação, arquitetura do Desafio 2
+demo/llm-cache/            cache auditado das conversas da demo (modo sem chave)
 pyproject.toml             dependências diretas; requirements*.txt é o lock gerado
 ```
 

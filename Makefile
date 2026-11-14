@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: install lock lint typecheck test check run run-api eval eval-frozen demo-cache
+.PHONY: install lock lint typecheck test check run run-api demo eval eval-frozen demo-cache
 
 install:
 	python3 -m venv .venv
@@ -25,6 +25,10 @@ check: lint typecheck test
 
 run:
 	$(PY) -m streamlit run app.py
+
+# Sem chave do Gemini: as conversas da demo respondem do cache publicado em demo/llm-cache
+demo:
+	LLM_CACHE=replay LLM_CACHE_DIR=demo/llm-cache $(PY) -m streamlit run app.py
 
 # API HTTP em http://localhost:8000 (documentação interativa em /docs)
 run-api:

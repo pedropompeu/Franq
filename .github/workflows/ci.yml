@@ -29,10 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
-      # Sem chave na CI. Com LLM_CACHE=replay o assistente monta sem chamar o Gemini; com o padrão
-      # (on) e sem GOOGLE_API_KEY, a api responde 503 no /health e o container fica unhealthy.
+      # Sem chave na CI. Com LLM_CACHE=replay o assistente monta sem chamar o Gemini e responde do
+      # cache publicado da demo; com o padrão (on) e sem GOOGLE_API_KEY, o /health responde 503.
       - name: Configurar sem chave
-        run: echo "LLM_CACHE=replay" > .env
+        run: printf 'LLM_CACHE=replay\nLLM_CACHE_DIR=/app/demo/llm-cache\n' > .env
       - name: Subir o compose
         run: docker compose up --build --detach --wait --wait-timeout 180
       - name: Conferir /health da API e do app
@@ -40,6 +40,11 @@ jobs:
           curl --fail --silent --show-error http://127.0.0.1:8000/health | tee health.json
           python3 -c "import json, re; h = json.load(open('health.json')); assert h['status'] == 'ok' and re.fullmatch('[0-9a-f]{8}', h['prompt_version']), h"
           curl --fail --silent --show-error http://127.0.0.1:8501/_stcore/health
+      - name: Responder uma pergunta da demo sem chave
+        run: |
+          curl --fail --silent --show-error -X POST http://127.0.0.1:8000/ask -H 'Content-Type: application/json' \
+            -d '{"question": "Liste os 5 estados com maior número de clientes que compraram via app em maio."}' > ask.json
+          python3 -c "import json; r = json.load(open('ask.json')); assert r['status'] == 'answered' and r['llm_calls'] > 0 and r['cache_hits'] == r['llm_calls'], r"
       - name: Logs
         if: failure()
         run: docker compose logs

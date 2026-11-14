@@ -16,6 +16,8 @@ COPY app.py .
 COPY .streamlit/ .streamlit/
 COPY src/ src/
 COPY data/ data/
+# Cache auditado das conversas da demo: LLM_CACHE=replay + LLM_CACHE_DIR=/app/demo/llm-cache, sem chave.
+COPY demo/ demo/
 
 # Usuário sem privilégios; só .cache (respostas do LLM) e traces/ são graváveis.
 RUN useradd --create-home --uid 10001 app \
