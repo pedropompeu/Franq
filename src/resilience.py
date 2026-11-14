@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import logging
 import random
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -35,6 +36,7 @@ from src.llm import LLMError, LLMReply, RateLimitError, StructuredLLM, Transient
 from src.progress import Progress, report
 
 PACIFIC = ZoneInfo("America/Los_Angeles")  # Gemini daily quotas reset at midnight Pacific time
+log = logging.getLogger(__name__)
 
 
 class CacheMiss(LLMError):
@@ -44,6 +46,17 @@ class CacheMiss(LLMError):
 def equal_jitter(delay: float) -> float:
     """Random delay in ``[delay / 2, delay]``: spreads retries out while keeping a minimum wait."""
     return delay / 2 + random.uniform(0, delay / 2)  # noqa: S311 - timing, not cryptography
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write through a uniquely named temp file, so readers and other threads never see half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def next_quota_reset(now: float) -> float:
@@ -67,8 +80,9 @@ class RateLimiter:
         self._lock = threading.Lock()
 
     def acquire(self) -> None:
-        with self._lock:
-            while True:
+        """Sleeps outside the lock, so every waiting caller reports its own wait (feedback 3.7)."""
+        while True:
+            with self._lock:
                 now = self._clock()
                 while self._sent and now - self._sent[0] >= 60.0:
                     self._sent.popleft()
@@ -76,13 +90,13 @@ class RateLimiter:
                     self._sent.append(now)
                     return
                 wait = 60.0 - (now - self._sent[0]) + 0.05
-                report(Progress("waiting", seconds=wait, reason="rate_limit"))
-                self._sleep(wait)
-                report(Progress("resumed"))
+            report(Progress("waiting", seconds=wait, reason="rate_limit"))
+            self._sleep(wait)
+            report(Progress("resumed"))
 
 
 class QuotaStore:
-    """Remembers, on disk, which models exhausted their daily quota and until when."""
+    """Remembers, on disk, which models are out of quota and until when (daily, or a long retry)."""
 
     def __init__(self, path: Path | None, *, clock: Callable[[], float] = time.time) -> None:
         self.path, self._clock = path, clock
@@ -96,20 +110,26 @@ class QuotaStore:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return dict(self._memory)
-        return {str(k): float(v) for k, v in raw.items()}
+        if not isinstance(raw, dict):
+            return dict(self._memory)
+        return {str(k): float(v) for k, v in raw.items() if isinstance(v, int | float) and not isinstance(v, bool)}
 
     def exhausted_until(self, model: str) -> float | None:
         until = self._load().get(model)
         return until if until is not None and until > self._clock() else None
 
-    def mark_exhausted(self, model: str) -> None:
+    def mark_exhausted(self, model: str, *, seconds: float | None = None) -> None:
+        """Until the next daily reset, or for ``seconds`` when the provider asked for a long wait."""
         with self._lock:
             data = self._load()
-            data[model] = next_quota_reset(self._clock())
+            now = self._clock()
+            data[model] = now + seconds if seconds is not None else next_quota_reset(now)
             self._memory = data
             if self.path is not None:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                self.path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                try:
+                    _write_atomic(self.path, json.dumps(data, indent=2))
+                except OSError as err:  # the mark stays in memory; losing it costs one request later
+                    log.warning("quota store not saved: %s", err)
 
 
 class ResilientLLM:
@@ -141,16 +161,21 @@ class ResilientLLM:
     def decide(self, messages: Sequence[BaseMessage]) -> LLMReply:
         model = self.model_name
         if self.quota is not None and self.quota.exhausted_until(model) is not None:
-            raise RateLimitError(f"{model}: cota diária já esgotada hoje", daily=True)
+            raise RateLimitError(f"{model}: cota esgotada por enquanto", daily=True)
         last: LLMError | None = None
         for attempt in range(1, self.max_attempts + 1):
             self.limiter.acquire()
             try:
                 return self.inner.decide(messages)
             except RateLimitError as err:
-                if err.daily or (err.retry_after is not None and err.retry_after > self.max_delay_s):
+                if err.daily:
                     if self.quota is not None:
                         self.quota.mark_exhausted(model)
+                    raise
+                if err.retry_after is not None and err.retry_after > self.max_delay_s:
+                    # a long per-minute wait blocks the model for that wait only, not the whole day (3.6)
+                    if self.quota is not None:
+                        self.quota.mark_exhausted(model, seconds=err.retry_after)
                     raise
                 # the server's retryDelay is honoured as given; only computed backoff gets jitter
                 last, delay = err, err.retry_after or self._backoff(attempt)
@@ -234,16 +259,11 @@ class CachedLLM:
         if self.mode == "replay":
             raise CacheMiss(f"{self.model_name}: pergunta fora do cache (LLM_CACHE=replay)")
         reply = self.inner.decide(messages)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(
-            json.dumps(
-                {"decision": reply.decision.model_dump(), "usage": reply.usage.model_dump(), "model": reply.model},
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+        payload = {"decision": reply.decision.model_dump(), "usage": reply.usage.model_dump(), "model": reply.model}
+        try:
+            _write_atomic(path, json.dumps(payload, ensure_ascii=False))
+        except OSError as err:  # a full or read-only disk must not throw away an answer already paid for
+            log.warning("LLM cache entry not saved: %s", err)
         return replace(reply, cached=False)
 
 

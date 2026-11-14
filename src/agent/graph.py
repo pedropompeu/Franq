@@ -13,6 +13,7 @@ Without a ``thread_id`` nothing is kept.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from contextlib import nullcontext
@@ -39,6 +40,15 @@ from src.semantic.dictionary import SemanticDictionary, load_dictionary, validat
 from src.versioning import prompt_version
 
 REFUSAL_FALLBACK = "Não posso atender a esse pedido. Só respondo perguntas consultando os dados."
+UNREAD_ANSWER = (
+    "O limite de passos acabou logo depois desta consulta, antes de eu revisar o resultado. "
+    "Os números estão na tabela abaixo."
+)
+NO_SQL_ERROR = (
+    "A resposta final cita números, mas `sql` veio vazia. Repita em `sql` a consulta já executada que sustenta "
+    "a resposta, ou rode uma consulta antes."
+)
+_DIGIT = re.compile(r"\d")
 
 
 class AgentState(TypedDict):
@@ -145,6 +155,9 @@ class Assistant:
     def _decide(self, state: AgentState) -> dict[str, object]:
         steps = state["steps"]
         if state["llm_calls"] >= self.limits.max_steps:
+            unread = self._unread_final(state)
+            if unread is not None:
+                return unread
             return {"response": self._fail(state, f"Limite de {self.limits.max_steps} passos atingido sem resposta.")}
         report(Progress(_llm_phase(steps)))
         messages = build_messages(
@@ -193,54 +206,56 @@ class Assistant:
             max_rows=self.settings.max_rows,
             timeout_s=self.settings.sql_timeout_s,
         )
-        update: dict[str, object] = {}
         if isinstance(outcome, QueryError):
             report(Progress("query_failed"))
-            steps.append(
-                Step(index=index, kind="query_error", thought=decision.thought, sql=decision.sql, error=outcome.message)
+            return self._reject(state, decision, outcome.message)
+        report(Progress("query_done", rows=outcome.row_count, elapsed_ms=outcome.elapsed_ms))
+        outcome = outcome.model_copy(update={"pii_columns": self._pii_columns(decision.sql, outcome)})
+        steps.append(
+            Step(
+                index=index,
+                kind="query",
+                thought=decision.thought,
+                sql=decision.sql,
+                row_count=outcome.row_count,
+                columns=outcome.columns,
+                elapsed_ms=outcome.elapsed_ms,
             )
-            corrections = state["corrections"] + 1
-            update["corrections"] = corrections
-            if corrections > self.limits.max_corrections:
-                update["response"] = self._fail(
-                    {**state, "steps": steps, "corrections": corrections},
-                    f"A consulta continuou falhando após {self.limits.max_corrections} correções.",
-                )
-        else:
-            report(Progress("query_done", rows=outcome.row_count, elapsed_ms=outcome.elapsed_ms))
-            outcome = outcome.model_copy(update={"pii_columns": self._pii_columns(decision.sql, outcome)})
-            steps.append(
-                Step(
-                    index=index,
-                    kind="query",
-                    thought=decision.thought,
-                    sql=decision.sql,
-                    row_count=outcome.row_count,
-                    columns=outcome.columns,
-                    elapsed_ms=outcome.elapsed_ms,
-                )
+        )
+        results[index] = outcome
+        return {"steps": steps, "results": results}
+
+    def _reject(self, state: AgentState, decision: AgentDecision, error: str) -> dict[str, object]:
+        """A failed step the model must correct; past ``max_corrections`` the question fails."""
+        steps = [
+            *state["steps"],
+            Step(
+                index=len(state["steps"]) + 1,
+                kind="query_error",
+                thought=decision.thought,
+                sql=decision.sql,
+                error=error,
+            ),
+        ]
+        corrections = state["corrections"] + 1
+        update: dict[str, object] = {"steps": steps, "corrections": corrections}
+        if corrections > self.limits.max_corrections:
+            update["response"] = self._fail(
+                {**state, "steps": steps, "corrections": corrections},
+                f"A consulta continuou falhando após {self.limits.max_corrections} correções.",
             )
-            results[index] = outcome
-        update.update({"steps": steps, "results": results})
         return update
 
-    def _finalize(self, state: AgentState) -> dict[str, object]:
-        decision = _require_decision(state)
-        result: QueryResult | None = None
-        if decision.sql.strip():
-            wanted = _normalize_sql(decision.sql)
-            matches = [s.index for s in state["steps"] if s.kind == "query" and _normalize_sql(s.sql) == wanted]
-            if not matches:
-                # Observe before answering: run it and let the model read the result first.
-                return self._run_step(state, decision)
-            result = state["results"][matches[-1]]
+    def _answered(
+        self, state: AgentState, decision: AgentDecision, result: QueryResult | None, answer: str
+    ) -> dict[str, object]:
         steps = [*state["steps"], Step(index=len(state["steps"]) + 1, kind="answer", thought=decision.thought)]
         return {
             "steps": steps,
             "response": AgentResponse(
                 question=state["question"],
                 status="answered",
-                answer=decision.answer,
+                answer=answer,
                 assumptions=decision.assumptions,
                 chart=resolve_chart(decision, result),
                 data=result,
@@ -250,6 +265,29 @@ class Assistant:
                 usage=state["usage"],
             ),
         }
+
+    def _unread_final(self, state: AgentState) -> dict[str, object] | None:
+        """Out of decisions right after running the final answer's SQL: show the data, not unread numbers."""
+        decision, steps = state["decision"], state["steps"]
+        if decision is None or decision.action != "final_answer" or not steps or steps[-1].kind != "query":
+            return None
+        if _normalize_sql(steps[-1].sql) != _normalize_sql(decision.sql):
+            return None
+        return self._answered(state, decision, state["results"][steps[-1].index], UNREAD_ANSWER)
+
+    def _finalize(self, state: AgentState) -> dict[str, object]:
+        decision = _require_decision(state)
+        result: QueryResult | None = None
+        if not decision.sql.strip() and _DIGIT.search(decision.answer):
+            return self._reject(state, decision, NO_SQL_ERROR)  # numbers must come from a query (feedback 3.5)
+        if decision.sql.strip():
+            wanted = _normalize_sql(decision.sql)
+            matches = [s.index for s in state["steps"] if s.kind == "query" and _normalize_sql(s.sql) == wanted]
+            if not matches:
+                # Observe before answering: run it and let the model read the result first.
+                return self._run_step(state, decision)
+            result = state["results"][matches[-1]]
+        return self._answered(state, decision, result, decision.answer)
 
     def _refuse(self, state: AgentState) -> dict[str, object]:
         decision = _require_decision(state)

@@ -72,6 +72,7 @@ def _chain(err: BaseException) -> Iterator[BaseException]:
         current = current.__cause__ or current.__context__
 
 
+_HTTP_429 = re.compile(r"(?<![\w.])429(?![\w.])")  # "1429 tokens" is not a rate limit (feedback 3.6)
 _RETRY_RE = re.compile(r"retry(?:Delay)?[^0-9]{0,8}(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
 _TRANSIENT_MARKERS = ("UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "timed out", "Timeout", "overloaded")
 
@@ -81,7 +82,7 @@ def classify_error(err: BaseException, model: str) -> LLMError:
     chain = list(_chain(err))
     text = " ".join(f"{type(e).__name__}: {e}" for e in chain)
     codes = {getattr(e, attr, None) for e in chain for attr in ("code", "status_code")}
-    if 429 in codes or "RESOURCE_EXHAUSTED" in text or "429" in text:
+    if 429 in codes or "RESOURCE_EXHAUSTED" in text or _HTTP_429.search(text):
         match = _RETRY_RE.search(text)
         return RateLimitError(
             f"{model}: limite de requisições (429)",

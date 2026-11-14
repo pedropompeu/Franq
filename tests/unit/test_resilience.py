@@ -289,3 +289,77 @@ def test_live_mode_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_CACHE", "on")
     with pytest.raises(LLMError, match="GOOGLE_API_KEY"):
         get_llm()
+
+
+# ---------------------------------------------------------------- feedback 2026-11-14, 3.3, 3.6, 3.7
+
+
+def test_429_needs_a_word_boundary_or_the_status() -> None:
+    assert not isinstance(classify_error(ValueError("prompt de 1429 tokens inválido"), "m"), RateLimitError)
+    assert isinstance(classify_error(ValueError("HTTP 429 Too Many Requests"), "m"), RateLimitError)
+    assert isinstance(classify_error(_ApiError(429, "slow down"), "m"), RateLimitError)
+
+
+def test_long_per_minute_wait_blocks_only_for_that_wait(tmp_path: Path) -> None:
+    clock = FakeClock(datetime(2026, 11, 12, 15, 0, tzinfo=PACIFIC).timestamp())
+    quota = QuotaStore(tmp_path / "quota.json", clock=clock)
+    inner = ScriptedLLM("m", [RateLimitError("429", retry_after=600.0)])
+    with pytest.raises(RateLimitError):
+        _resilient(inner, clock, quota).decide(MESSAGES)
+    until = quota.exhausted_until("m")
+    assert until is not None and until == pytest.approx(clock.now + 600.0)
+    clock.now += 601
+    assert quota.exhausted_until("m") is None  # not until Pacific midnight
+
+
+def test_quota_store_ignores_bad_entries_and_writes_atomically(tmp_path: Path) -> None:
+    path = tmp_path / "quota.json"
+    path.write_text('{"a": null, "b": "x", "c": [1]}', encoding="utf-8")
+    store = QuotaStore(path, clock=lambda: 0.0)
+    assert store.exhausted_until("a") is None and store.exhausted_until("c") is None
+    store.mark_exhausted("m")
+    assert store.exhausted_until("m") is not None
+    assert [p.name for p in tmp_path.iterdir()] == ["quota.json"]  # no temp file left behind
+    path.write_text("[1, 2]", encoding="utf-8")  # not even an object
+    assert QuotaStore(path, clock=lambda: 0.0).exhausted_until("m") is None
+
+
+def test_cache_write_failure_keeps_the_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inner = ScriptedLLM("m")
+    cached = CachedLLM(inner, tmp_path)
+
+    def broken(*args: object, **kwargs: object) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", broken)
+    reply = cached.decide(MESSAGES)
+    assert reply.decision == DECISION and not reply.cached
+
+
+def test_cache_temp_files_are_unique_per_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    names: list[str] = []
+    original = Path.write_text
+
+    def spy(self: Path, *args: object, **kwargs: object) -> int:
+        names.append(self.name)
+        return original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    CachedLLM(ScriptedLLM("m"), tmp_path / "a").decide(MESSAGES)
+    CachedLLM(ScriptedLLM("m"), tmp_path / "b").decide(MESSAGES)
+    assert len(names) == 2 and names[0] != names[1]
+
+
+def test_rate_limiter_sleeps_without_holding_the_lock() -> None:
+    clock = FakeClock()
+    held: list[bool] = []
+    limiter = RateLimiter(1, clock=clock)
+
+    def sleep(seconds: float) -> None:
+        held.append(limiter._lock.locked())
+        clock.sleep(seconds)
+
+    limiter._sleep = sleep
+    limiter.acquire()
+    limiter.acquire()
+    assert held == [False]

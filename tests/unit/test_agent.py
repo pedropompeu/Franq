@@ -314,3 +314,38 @@ def test_same_thread_questions_run_one_at_a_time(settings: Settings) -> None:
     second.join(5)
     assert not any(overlap)
     assert [t.question for t in assistant.history("t")] == ["Primeira?", "Segunda?"]
+
+
+# ------------------------------------------------------- feedback 2026-11-14, 3.4 and 3.5
+
+
+def test_last_decision_is_announced_to_the_model(settings: Settings) -> None:
+    llm = FakeLLM([query(P2_SQL), answer(P2_SQL, "17 clientes.")])
+    Assistant(llm, settings, limits=AgentLimits(max_steps=2)).ask("WhatsApp 2024?")
+    assert "última decisão" not in llm.prompts[0]
+    assert "última decisão" in llm.prompts[1] and "final_answer" in llm.prompts[1]
+
+
+def test_final_sql_run_on_the_last_step_answers_with_the_data(settings: Settings) -> None:
+    llm = FakeLLM([answer(P2_SQL, "São 99 clientes.")])  # SQL never ran before: runs now, at the limit
+    response = Assistant(llm, settings, limits=AgentLimits(max_steps=1)).ask("WhatsApp 2024?")
+
+    assert response.status == "answered" and response.llm_calls == 1
+    assert response.data is not None and response.data.rows == [[17]]
+    assert "99" not in response.answer  # the model never read the result: its numbers are not shown
+    assert [s.kind for s in response.steps] == ["query", "answer"]
+
+
+def test_final_answer_with_numbers_but_no_sql_goes_back(settings: Settings) -> None:
+    llm = FakeLLM([answer("", "São 42 clientes."), query(P2_SQL), answer(P2_SQL, "17 clientes.")])
+    response = Assistant(llm, settings).ask("WhatsApp 2024?")
+
+    assert response.status == "answered" and response.answer == "17 clientes."
+    assert response.steps[0].kind == "query_error" and response.corrections == 1
+    assert "sql" in llm.prompts[1].lower() and "42" not in response.answer
+
+
+def test_final_answer_without_numbers_needs_no_sql(settings: Settings) -> None:
+    llm = FakeLLM([answer("", "O banco não guarda o motivo do cancelamento.")])
+    response = Assistant(llm, settings).ask("Por que os clientes cancelam?")
+    assert response.status == "answered" and response.data is None

@@ -110,6 +110,12 @@ def render_conversation(history: Sequence[Turn], privacy: Pseudonymizer | None =
     return "# Conversa anterior (mais antiga primeiro)\n" + "\n\n".join(turns) + f"\n\n{CONVERSATION_NOTE}\n\n"
 
 
+LAST_DECISION = (
+    "Esta é a sua última decisão: use action=final_answer com a consulta já executada que responde à pergunta "
+    "(ou refuse). Uma nova run_query não seria lida."
+)
+
+
 def build_messages(
     question: str,
     context: str,
@@ -128,9 +134,10 @@ def build_messages(
     """
     privacy = privacy or Pseudonymizer()
     past = render_history(steps, results, max_rows, privacy)
+    budget = LAST_DECISION if remaining_steps == 1 else f"Você ainda tem {remaining_steps} decisão(ões)."
     user = (
         f"{context}\n\n{render_conversation(history, privacy)}# Pergunta do usuário\n{privacy.mask(question)}\n\n"
-        f"# Passos até agora\n{past}\n\nVocê ainda tem {remaining_steps} decisão(ões). Decida o próximo passo."
+        f"# Passos até agora\n{past}\n\n{budget} Decida o próximo passo."
     )
     if TOKEN.search(user):
         user += f"\n\n# Dados pessoais\n{PROMPT_NOTE}"
