@@ -72,7 +72,8 @@ from src.privacy import TOKEN, Pseudonymizer, load_pseudonymizer
 from src.semantic.dictionary import load_dictionary
 
 QUESTIONS_PATH = PROJECT_ROOT / "tests" / "eval" / "questions.yaml"
-PARAPHRASES_PATH = PROJECT_ROOT / "tests" / "eval" / "paraphrases.yaml"  # frozen, never used for tuning
+PARAPHRASES_PATH = PROJECT_ROOT / "tests" / "eval" / "paraphrases.yaml"  # frozen v1: measure of prompt 10e909f9
+PARAPHRASES_V2_PATH = PROJECT_ROOT / "tests" / "eval" / "paraphrases_v2.yaml"  # frozen v2, never used for tuning
 REPORT_PATH = PROJECT_ROOT / "docs" / "avaliacao.md"
 BASELINE_PATH = PROJECT_ROOT / "docs" / "avaliacao.json"
 EVAL_TRACE_PATH = PROJECT_ROOT / "traces" / "eval.jsonl"
@@ -93,6 +94,9 @@ KIND_LABEL = {
     "injecao_dados": "Injeção nos dados",
     "acompanhamento": "Acompanhamento",
     "inedita": "Inédita",
+    "ranking": "Ranking",
+    "valor_unico": "Valor único",
+    "agrupamento": "Agrupamento",
 }
 CHECK_LABEL = {
     "status": "status",

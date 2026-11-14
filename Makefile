@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: install lock lint typecheck test check run run-api demo eval eval-frozen demo-cache
+.PHONY: install lock lint typecheck test check run run-api demo eval eval-frozen eval-frozen-v1 demo-cache
 
 install:
 	python3 -m venv .venv
@@ -38,8 +38,13 @@ run-api:
 eval:
 	$(PY) -m src.evaluation $(ARGS)
 
-# Conjunto congelado (tests/eval/paraphrases.yaml): medida fora da amostra, com base própria
+# Conjunto congelado v2 (tests/eval/paraphrases_v2.yaml): medida fora da amostra, com base própria
 eval-frozen:
+	$(PY) -m src.evaluation --questions tests/eval/paraphrases_v2.yaml \
+		--output docs/avaliacao_congelada_v2.md --baseline docs/avaliacao_congelada_v2.json $(ARGS)
+
+# Congelado v1 (tests/eval/paraphrases.yaml): medida do prompt 10e909f9; para prompts novos é histórico
+eval-frozen-v1:
 	$(PY) -m src.evaluation --questions tests/eval/paraphrases.yaml \
 		--output docs/avaliacao_congelada.md --baseline docs/avaliacao_congelada.json $(ARGS)
 

@@ -66,7 +66,8 @@ Os outros alvos do `Makefile`, como comandos crus. Troque `python` por `.venv\Sc
 | `make check` | `python -m ruff check .` · `python -m ruff format --check .` · `python -m mypy` · `python -m pytest` |
 | `make run-api` | `python -m uvicorn src.api:app --reload` |
 | `make eval ARGS="--repeat 3"` | `python -m src.evaluation --repeat 3` |
-| `make eval-frozen` | `python -m src.evaluation --questions tests/eval/paraphrases.yaml --output docs/avaliacao_congelada.md --baseline docs/avaliacao_congelada.json` |
+| `make eval-frozen` | `python -m src.evaluation --questions tests/eval/paraphrases_v2.yaml --output docs/avaliacao_congelada_v2.md --baseline docs/avaliacao_congelada_v2.json` |
+| `make eval-frozen-v1` | o mesmo com `tests/eval/paraphrases.yaml` e `docs/avaliacao_congelada.md` (histórico do prompt `10e909f9`) |
 | `make demo` | `LLM_CACHE=replay LLM_CACHE_DIR=demo/llm-cache python -m streamlit run app.py` |
 | `make demo-cache` | `python -m src.demo_cache` |
 | `make lock` | `python -m piptools compile --extra langfuse --strip-extras -o requirements.txt pyproject.toml` (e o mesmo com `--extra dev` para `requirements-dev.txt`) |
@@ -311,7 +312,8 @@ src/
   cli.py                   uso pela linha de comando
 tests/unit/                testes com LLM falso e determinístico
 tests/eval/questions.yaml  perguntas de referência (conjunto de ajuste)
-tests/eval/paraphrases.yaml conjunto congelado: paráfrases e perguntas inéditas
+tests/eval/paraphrases.yaml conjunto congelado v1: paráfrases e perguntas inéditas
+tests/eval/paraphrases_v2.yaml conjunto congelado v2: 34 perguntas inéditas
 docs/                      ADRs, avaliação, arquitetura do Desafio 2
 demo/llm-cache/            cache auditado das conversas da demo (modo sem chave)
 pyproject.toml             dependências diretas; requirements*.txt é o lock gerado

@@ -19,6 +19,7 @@ from src.config import Settings
 from src.db.tools import QueryResult
 from src.evaluation import (
     PARAPHRASES_PATH,
+    PARAPHRASES_V2_PATH,
     PLANTED_COLUMN,
     PLANTED_MARKER,
     QUESTIONS_PATH,
@@ -651,6 +652,40 @@ def test_frozen_set_is_valid_and_apart_from_the_tuning_set(db_path: Path) -> Non
 def test_frozen_set_has_no_personal_data(db_path: Path) -> None:
     privacy = load_pseudonymizer(db_path, load_dictionary(DICTIONARY).pii_columns())
     text = PARAPHRASES_PATH.read_text(encoding="utf-8")
+    assert privacy.mask(text) == text
+
+
+# Frozen v2, written before the prompt change that the first live run of v1 called for (see its header).
+PARAPHRASES_V2_SHA256 = "fdfcdb8d1d10b4c254f1027e3a03aafe4815a27df36751a32d913a7c0128b465"
+
+
+def test_frozen_v2_is_unchanged() -> None:
+    data = PARAPHRASES_V2_PATH.read_bytes().replace(b"\r\n", b"\n")
+    assert hashlib.sha256(data).hexdigest() == PARAPHRASES_V2_SHA256
+
+
+def test_frozen_v2_is_valid_and_apart_from_the_other_sets(db_path: Path) -> None:
+    v2 = load_cases(PARAPHRASES_V2_PATH)
+    others = load_cases() + load_cases(PARAPHRASES_PATH)
+    assert len(v2) >= 30 and len({c.id for c in v2}) == len(v2)
+    assert not {c.id for c in v2} & {c.id for c in others}
+    seen = {" ".join(c.question.lower().split()) for c in others}
+    assert not [c.id for c in v2 if " ".join(c.question.lower().split()) in seen]
+    assert all(c.kind in evaluation.KIND_LABEL for c in v2)
+    assert all(c.assumption_terms for c in v2 if c.assumption)
+    singular = [c for c in v2 if c.match == "ranking" and c.k == 1]
+    assert len(singular) >= 5  # the failure that called for v2: a full ranking for "qual é o maior"
+    for c in v2:
+        references = [run_reference(db_path, sql) for sql in c.reference]
+        assert all(rows for _, rows in references), f"{c.id}: reference returned no rows"
+        for trap in c.traps:
+            wrong = run_reference(db_path, trap)
+            assert not any(result_matches(wrong, ref, c) for ref in references), f"{c.id}: trap matches"
+
+
+def test_frozen_v2_has_no_personal_data(db_path: Path) -> None:
+    privacy = load_pseudonymizer(db_path, load_dictionary(DICTIONARY).pii_columns())
+    text = PARAPHRASES_V2_PATH.read_text(encoding="utf-8")
     assert privacy.mask(text) == text
 
 
