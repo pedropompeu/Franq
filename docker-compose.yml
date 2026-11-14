@@ -1,5 +1,6 @@
 # docker compose up → app em http://localhost:8501 e API em http://localhost:8000 (/docs)
-# Única configuração obrigatória: GOOGLE_API_KEY no arquivo .env (copie de .env.example).
+# Única configuração obrigatória: GOOGLE_API_KEY no arquivo .env (copie de .env.example). Sem chave,
+# a api fica unhealthy de propósito (/health responde 503) até definir a chave ou LLM_CACHE=replay.
 # As portas ficam só em 127.0.0.1: a interface não tem login. Para expor a API, defina API_KEY.
 services:
   app:
