@@ -57,6 +57,10 @@ tables:
     columns:
       interagiu:
         note: 1 = o cliente interagiu com o envio, 0 = não interagiu.
+      nome_campanha:
+        note: >-
+          Nome do tema da campanha (Black Friday, Natal...), não do período: cada nome foi enviado
+          ao longo de toda a janela de dados. O período de um envio é sempre data_envio.
 
 metrics:
   - name: reclamacoes_nao_resolvidas
@@ -85,10 +89,12 @@ metrics:
     columns: [compras.id, compras.cliente_id]
     ambiguity: >-
       O denominador pode ser (a) os clientes que compraram no recorte (padrão adotado) ou
-      (b) todos os clientes cadastrados. Sempre declarar qual foi usado na resposta.
+      (b) todos os clientes cadastrados. Sempre declarar qual foi usado na resposta. Num ranking
+      por categoria as duas leituras podem inverter a ordem: mostrar as duas.
 
 conventions:
   - Contagem de clientes é sempre COUNT(DISTINCT cliente_id), nunca COUNT(*).
+  - Mês citado sem ano = a ocorrência mais recente desse mês nos dados. Se o mês aparece em mais de um ano, declarar o ano adotado.
   - Datas são TEXT no formato YYYY-MM-DD. Usar strftime('%Y-%m', coluna), strftime('%Y', coluna) ou date().
   - Booleanos são inteiros 0/1.
   - Comparar valores categóricos com a grafia exata descoberta no schema (acentos e maiúsculas).

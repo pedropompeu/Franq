@@ -9,7 +9,16 @@ import pytest
 
 from src.agent import notices
 from src.agent.graph import Assistant
-from src.agent.notices import compute_notices, period_notices, series_notices, tie_notice
+from src.agent.notices import (
+    additive_columns,
+    binomial_two_sided,
+    compute_notices,
+    months_between,
+    period_notices,
+    series_notices,
+    tie_notice,
+    trend_notices,
+)
 from src.config import Settings
 from src.db.tools import QueryResult, SchemaInfo, discover_schema, run_sql
 from tests.unit.test_agent import FakeLLM, answer, query
@@ -284,3 +293,96 @@ def test_series_and_period_notices_do_not_repeat_a_month(db_path: Path, schema: 
     settings = dataclasses.replace(Settings.from_env(), db_path=db_path)
     found = compute_notices(sql, executed(sql, db_path), schema, settings)
     assert sum("Julho de 2025" in n.text or "julho de 2025" in n.text for n in found) == 1
+
+
+# ------------------------------------------------------------------ trend (feedback 5.2)
+
+E5_LONG = (
+    "SELECT strftime('%Y-%m', data_contato) AS mes, canal, COUNT(*) AS reclamacoes FROM suporte "
+    "WHERE tipo_contato = 'Reclamação' "
+    "AND data_contato > date((SELECT MAX(data_contato) FROM suporte), '-1 year') GROUP BY mes, canal"
+)
+
+
+def test_trend_compares_halves_by_days_and_flags_low_volume(db_path: Path, schema: SchemaInfo) -> None:
+    """Telefone falls 23 → 12, but at 0 to 6 complaints a month that is not evidence of a trend."""
+    [n] = trend_notices(E5_LONG, executed(E5_LONG, db_path), schema)
+    assert n.kind == "trend"
+    assert n.text == (
+        "Tendência, primeira metade do período (jul/2024 a jan/2025) contra a segunda (fev/2025 a jul/2025), "
+        "ajustada pelos dias cobertos: Chat 16 → 18 (+26% por dia, p = 0,50); E-mail 12 → 16 (+50% por dia, "
+        "p = 0,35); Telefone 23 → 12 (-41% por dia, p = 0,17). Nenhuma diferença é estatisticamente "
+        "significativa (p < 0,05): não há evidência de tendência. Com 0 a 6 registros por mês em suporte, "
+        "o volume é baixo para afirmar tendência."
+    )
+
+
+def test_trend_reads_the_wide_format(db_path: Path, schema: SchemaInfo) -> None:
+    sql = (
+        "SELECT strftime('%Y-%m', data_contato) AS mes, SUM(canal = 'Telefone') AS telefone, "
+        "SUM(CASE WHEN canal = 'Chat' THEN 1 ELSE 0 END) AS chat FROM suporte "
+        "WHERE tipo_contato = 'Reclamação' GROUP BY mes"
+    )
+    [n] = trend_notices(sql, executed(sql, db_path), schema)
+    assert "chat 16 → 18" in n.text and "telefone 23 → 12" in n.text
+
+
+def test_trend_of_a_single_series_without_low_volume_warning(db_path: Path, schema: SchemaInfo) -> None:
+    sql = "SELECT strftime('%Y-%m', data_compra) AS mes, COUNT(*) AS compras FROM compras GROUP BY mes"
+    [n] = trend_notices(sql, executed(sql, db_path), schema)
+    assert ": Total 481 → 465 (" in n.text and "volume é baixo" not in n.text
+
+
+def test_trend_flags_only_the_significant_series(schema: SchemaInfo) -> None:
+    months = months_between("2024-08", "2025-05")
+    rows = [[m, "A", 30 if i < 5 else 5] for i, m in enumerate(months)] + [[m, "B", 10] for m in months]
+    sql = "SELECT strftime('%Y-%m', data_contato) AS mes, canal, COUNT(*) AS n FROM suporte GROUP BY mes, canal"
+    data = QueryResult(
+        sql=sql, columns=["mes", "canal", "n"], rows=rows, row_count=len(rows), truncated=False, elapsed_ms=1
+    )
+    [n] = trend_notices(sql, data, schema)
+    assert "A 150 → 25" in n.text and "B 50 → 50" in n.text
+    assert "Só A tem diferença estatisticamente significativa" in n.text
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # a sum of money is not a count of independent events: no binomial test
+        "SELECT strftime('%Y-%m', data_compra) AS mes, SUM(valor) FROM compras GROUP BY mes",
+        "SELECT strftime('%Y-%m', data_compra) AS mes, AVG(valor) FROM compras GROUP BY mes",
+        # fewer than six months
+        "SELECT strftime('%Y-%m', data_compra) AS mes, COUNT(*) FROM compras "
+        "WHERE data_compra BETWEEN '2025-01-01' AND '2025-04-30' GROUP BY mes",
+        # not a monthly series
+        "SELECT canal, COUNT(*) FROM compras GROUP BY canal",
+        # two label columns: which one is the series?
+        "SELECT strftime('%Y-%m', data_compra) AS mes, canal, categoria, COUNT(*) FROM compras GROUP BY 1, 2, 3",
+    ],
+)
+def test_no_trend_notice(sql: str, db_path: Path, schema: SchemaInfo) -> None:
+    assert trend_notices(sql, executed(sql, db_path), schema) == []
+
+
+def test_trend_months_follow_literal_day_bounds(db_path: Path, schema: SchemaInfo) -> None:
+    """A filter starting on 2024-10-15 makes October a half month, not a whole one."""
+    sql = (
+        "SELECT strftime('%Y-%m', data_compra) AS mes, COUNT(*) FROM compras "
+        "WHERE data_compra >= '2024-10-15' GROUP BY mes"
+    )
+    [n] = trend_notices(sql, executed(sql, db_path), schema)
+    assert "(out/2024 a fev/2025)" in n.text and "(mar/2025 a jul/2025)" in n.text
+
+
+def test_binomial_two_sided() -> None:
+    assert binomial_two_sided(5, 10, 0.5) == pytest.approx(1.0)
+    assert binomial_two_sided(0, 10, 0.5) == pytest.approx(2 / 1024)
+    assert binomial_two_sided(23, 35, 0.5) == pytest.approx(0.0895, abs=1e-3)  # the reviewer's number
+    assert binomial_two_sided(0, 0, 0.5) == 1.0
+
+
+def test_additive_columns_and_months_between() -> None:
+    sql = "SELECT mes, COUNT(*), SUM(valor), AVG(valor), SUM(x = 1) FROM t GROUP BY mes"
+    assert additive_columns(sql, 5) == {1, 2, 4}
+    assert additive_columns("SELECT * FROM t", 3) == frozenset()
+    assert months_between("2024-11", "2025-02") == ["2024-11", "2024-12", "2025-01", "2025-02"]

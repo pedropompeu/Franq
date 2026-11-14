@@ -19,6 +19,7 @@ from typing import Any, cast
 import altair as alt
 
 from src.agent.models import AgentResponse, ChartSpec
+from src.agent.notices import additive_columns, months_between
 from src.agent.notices import br_date as br_date  # re-exported for app.py
 from src.config import Price
 from src.db.tools import QueryResult, SchemaInfo
@@ -194,11 +195,43 @@ def _axis_config(chart: alt.LayerChart | alt.Chart) -> alt.LayerChart | alt.Char
     return cast(alt.LayerChart | alt.Chart, configured)
 
 
+_MONTH_LABEL = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
+
+
+def chart_records(chart: ChartSpec, result: QueryResult) -> tuple[list[dict[str, Any]], list[str] | None]:
+    """Rows to draw, and every month of the axis when a line chart's x is ``YYYY-MM`` (feedback 5.2).
+
+    The SQL's GROUP BY has no row for a month without records, and the line would join its
+    neighbours over it. For a COUNT or SUM that month is a zero and is drawn as one; any other
+    measure (an average) has no value there, so it gets no point, but the axis still shows the month.
+    """
+    rows = records(result)
+    if chart.type != "line" or chart.x not in result.columns or chart.y not in result.columns:
+        return rows, None
+    xs = column_values(result, chart.x)
+    if not xs or not all(isinstance(v, str) and _MONTH_LABEL.fullmatch(v) for v in xs):
+        return rows, None
+    months = months_between(min(xs), max(xs))
+    additive = {result.columns[i] for i in additive_columns(result.sql, len(result.columns))}
+    if chart.y in additive:
+        groups: list[str | None] = list(series_domain(result, chart.series)) if chart.series else [None]
+        present = {(r[chart.x], None if chart.series is None else str(r[chart.series])) for r in rows}
+        for month in months:
+            for group in groups:
+                if (month, group) not in present:
+                    filler: dict[str, Any] = {chart.x: month, chart.y: 0}
+                    if chart.series is not None:
+                        filler[chart.series] = group
+                    rows.append(filler)
+    return rows, months
+
+
 def build_chart(chart: ChartSpec, result: QueryResult) -> alt.Chart | alt.LayerChart | None:
     """Altair spec for bar/line; ``None`` for metric and table (rendered by the app)."""
     if chart.type not in ("bar", "line") or chart.x is None or chart.y is None:
         return None
-    data = alt.InlineData(values=records(result))
+    rows, months = chart_records(chart, result)
+    data = alt.InlineData(values=rows)
     tooltip = [_tooltip(result, c) for c in result.columns]
     color: Any = alt.Undefined
     if chart.series is not None:
@@ -221,8 +254,8 @@ def build_chart(chart: ChartSpec, result: QueryResult) -> alt.Chart | alt.LayerC
         )
         if chart.series is not None:
             encoded = encoded.encode(color=color, yOffset=alt.YOffset(f"{chart.series}:N"))
-        rows = len({str(v) for v in column_values(result, chart.x)})
-        return _axis_config(encoded.properties(height=max(160, 34 * rows)))
+        bars = len({str(v) for v in column_values(result, chart.x)})
+        return _axis_config(encoded.properties(height=max(160, 34 * bars)))
 
     line = (
         alt.Chart(data)
@@ -232,7 +265,13 @@ def build_chart(chart: ChartSpec, result: QueryResult) -> alt.Chart | alt.LayerC
             point=alt.OverlayMarkDef(size=64, filled=True),
         )
         .encode(
-            x=alt.X(f"{chart.x}:O", sort="ascending", title=None, axis=alt.Axis(labelAngle=0)),
+            x=alt.X(
+                f"{chart.x}:O",
+                sort="ascending",
+                title=None,
+                axis=alt.Axis(labelAngle=0),
+                scale=alt.Scale(domain=months) if months else alt.Undefined,
+            ),
             y=alt.Y(f"{chart.y}:Q", title=humanize(chart.y), axis=_measure_axis(result, chart.y)),
             tooltip=tooltip,
         )

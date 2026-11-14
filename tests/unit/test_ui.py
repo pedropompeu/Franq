@@ -271,3 +271,40 @@ def test_cost_row_only_with_price() -> None:
     assert list(rows)[-1] == texts.METRIC_COST
     # 3000 * 0,30 + 200 * 2,50 = 1400 US$ per million questions → US$ 1,40 per thousand
     assert rows[texts.METRIC_COST] == "1,40"
+
+
+# ------------------------------------------------------------------ months without records (feedback 5.2)
+
+LONG_SQL = "SELECT strftime('%Y-%m', data_contato) AS mes, canal, COUNT(*) AS n FROM suporte GROUP BY mes, canal"
+
+
+def test_count_series_draws_missing_months_as_zero() -> None:
+    chart = ChartSpec(type="line", x="mes", y="n", series="canal")
+    data = result(
+        ["mes", "canal", "n"],
+        [["2024-11", "Chat", 2], ["2024-11", "Telefone", 1], ["2025-01", "Chat", 3]],
+        sql=LONG_SQL,
+    )
+    rows, months = view.chart_records(chart, data)
+    assert months == ["2024-11", "2024-12", "2025-01"]
+    filled = {(r["mes"], r["canal"]): r["n"] for r in rows}
+    assert filled[("2024-12", "Chat")] == 0 and filled[("2024-12", "Telefone")] == 0
+    assert filled[("2025-01", "Telefone")] == 0 and filled[("2025-01", "Chat")] == 3
+    spec = view.build_chart(chart, data)
+    assert spec is not None
+    assert spec.to_dict()["encoding"]["x"]["scale"]["domain"] == months
+
+
+def test_average_series_keeps_the_gap_but_shows_the_month() -> None:
+    chart = ChartSpec(type="line", x="mes", y="ticket")
+    sql = "SELECT strftime('%Y-%m', data_compra) AS mes, AVG(valor) AS ticket FROM compras GROUP BY mes"
+    data = result(["mes", "ticket"], [["2025-01", 10.5], ["2025-03", 12.0]], sql=sql)
+    rows, months = view.chart_records(chart, data)
+    assert len(rows) == 2 and months == ["2025-01", "2025-02", "2025-03"]
+
+
+def test_non_monthly_or_bar_charts_are_untouched() -> None:
+    bar = ChartSpec(type="bar", x="estado", y="clientes")
+    assert view.chart_records(bar, STATES) == (view.records(STATES), None)
+    yearly = result(["ano", "n"], [["2024", 1], ["2025", 2]], sql="SELECT ano, COUNT(*) AS n FROM t GROUP BY ano")
+    assert view.chart_records(ChartSpec(type="line", x="ano", y="n"), yearly)[1] is None

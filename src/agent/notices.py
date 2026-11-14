@@ -6,6 +6,8 @@
   ``>=``/``<``); or a monthly series (``strftime('%Y-%m', col)`` in the result) starts or ends in
   a month the data cover only in part.
 * ``empty_period``: the filtered period has no data at all.
+* ``trend``: a monthly count series, first half of the period against the second, adjusted by the
+  days each half covers, with an exact binomial test and a warning when the monthly volume is low.
 
 Anything this module cannot analyze yields no notice; ``compute_notices`` never raises.
 """
@@ -13,6 +15,7 @@ Anything this module cannot analyze yields no notice; ``compute_notices`` never 
 from __future__ import annotations
 
 import logging
+import math
 import re
 from calendar import monthrange
 from collections.abc import Iterable, Sequence
@@ -361,6 +364,211 @@ def series_notices(sql: str, result: QueryResult, schema: SchemaInfo, *, covered
     return found
 
 
+# ------------------------------------------------------------------ trend of a monthly series
+
+ALPHA = 0.05
+MIN_TREND_MONTHS = 6
+LOW_VOLUME = 10  # a month with fewer records than this makes a trend claim fragile
+MAX_TREND_SERIES = 8
+_MONTH = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
+_SHORT_MONTHS = ("jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez")
+
+
+def _is_flag(node: exp.Expr | None) -> bool:
+    """A predicate, or ``CASE WHEN ... THEN 1 ELSE 0 END``: summing it counts rows."""
+    if isinstance(node, exp.Predicate):
+        return True
+    if not isinstance(node, exp.Case):
+        return False
+    values = [w.args.get("true") for w in node.args.get("ifs", [])] + [node.args.get("default")]
+    return all(v is None or (isinstance(v, exp.Literal) and v.this in ("0", "1")) for v in values)
+
+
+def _measure(projection: exp.Expr) -> str | None:
+    """``"count"`` for COUNT(...) or SUM of a 0/1 flag, ``"sum"`` for any other SUM, else ``None``."""
+    call = projection.this if isinstance(projection, exp.Alias) else projection
+    if isinstance(call, exp.Count):
+        return "count"
+    if isinstance(call, exp.Sum):
+        return "count" if _is_flag(call.this) else "sum"
+    return None
+
+
+def additive_columns(sql: str, width: int) -> frozenset[int]:
+    """Result columns that are COUNT or SUM: a month missing from them is a zero, not a gap.
+
+    ``width`` is the number of result columns; a query whose projections do not match it
+    (``SELECT *``) yields nothing.
+    """
+    tree = _parse(sql)
+    if not isinstance(tree, exp.Select) or len(tree.selects) != width:
+        return frozenset()
+    return frozenset(i for i, p in enumerate(tree.selects) if _measure(p) is not None)
+
+
+def months_between(first: str, last: str) -> list[str]:
+    """``'2024-11'``, ``'2025-02'`` → every ``YYYY-MM`` from the first to the last, inclusive."""
+    year, month = int(first[:4]), int(first[5:7])
+    found: list[str] = []
+    while f"{year:04d}-{month:02d}" <= last:
+        found.append(f"{year:04d}-{month:02d}")
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return found
+
+
+def short_month(month: str) -> str:
+    """``'2024-07'`` → ``'jul/2024'``."""
+    return f"{_SHORT_MONTHS[int(month[5:7]) - 1]}/{month[:4]}"
+
+
+def binomial_two_sided(k: int, n: int, p: float) -> float:
+    """Exact two-sided binomial test: probability of an outcome at most as likely as ``k``."""
+    if n == 0 or p <= 0 or p >= 1:
+        return 1.0
+
+    def log_pmf(i: int) -> float:
+        return (
+            math.lgamma(n + 1)
+            - math.lgamma(i + 1)
+            - math.lgamma(n - i + 1)
+            + i * math.log(p)
+            + (n - i) * math.log1p(-p)
+        )
+
+    observed = log_pmf(k)
+    return min(1.0, sum(math.exp(q) for q in map(log_pmf, range(n + 1)) if q <= observed + 1e-7))
+
+
+def _days(month: str, lo: str, hi: str) -> int:
+    """Days of ``month`` inside [lo, hi]."""
+    first, last, _ = _bounds("%Y-%m", month)
+    start, end = max(first, lo), min(last, hi)
+    return max(0, (date.fromisoformat(end) - date.fromisoformat(start)).days + 1) if start <= end else 0
+
+
+def _filter_bounds(tree: exp.Select, column: exp.Column, lo: str, hi: str) -> tuple[str, str]:
+    """The data range narrowed by literal day bounds on ``column`` in the outer WHERE."""
+    where = tree.args.get("where")
+    for node in where.find_all(exp.Between, *_FLIP) if where is not None else ():
+        bounds = _day_bounds(node)
+        if bounds is None or bounds[0].name != column.name or node.find_ancestor(exp.Select) is not tree:
+            continue
+        lo, hi = max(lo, bounds[1] or lo), min(hi, bounds[2] or hi)
+    return lo, hi
+
+
+def _pt(value: float, digits: int = 2) -> str:
+    return f"{value:.{digits}f}".replace(".", ",")
+
+
+def _p_label(p: float) -> str:
+    return "p < 0,01" if p < 0.01 else f"p = {_pt(p)}"
+
+
+def _change(before: int, before_days: int, after: int, after_days: int) -> str:
+    if before == 0:
+        return "sem registros antes" if after == 0 else "surge na segunda metade"
+    change = (after / after_days) / (before / before_days) - 1
+    return f"{'+' if change >= 0 else '-'}{abs(change) * 100:.0f}% por dia"
+
+
+def _series_counts(tree: exp.Select, result: QueryResult, month_at: int) -> dict[str, dict[str, int]] | None:
+    """series → month → count, from a long (one count, one label column) or wide (one count per
+    series) result; ``None`` when the result has another shape or a non-count measure."""
+    kinds = [_measure(p) for p in tree.selects]
+    counts = [i for i, k in enumerate(kinds) if k == "count"]
+    labels = [i for i, k in enumerate(kinds) if k is None and i != month_at]
+    if not counts or "sum" in kinds or len(labels) > 1 or (len(counts) > 1 and labels):
+        return None
+    series: dict[str, dict[str, int]] = {}
+    for row in result.rows:
+        month = row[month_at]
+        if not isinstance(month, str) or not _MONTH.fullmatch(month):
+            return None
+        for i in counts:
+            value = row[i] if row[i] is not None else 0
+            if not isinstance(value, int) or isinstance(value, bool):
+                return None
+            name = str(row[labels[0]]) if labels else (result.columns[i] if len(counts) > 1 else "Total")
+            per_month = series.setdefault(name, {})
+            per_month[month] = per_month.get(month, 0) + value
+    return series
+
+
+def trend_notices(sql: str, result: QueryResult, schema: SchemaInfo) -> list[Notice]:
+    """Is the monthly series going up or down, or just oscillating? (feedback 5.2)
+
+    The period is split in two halves by days covered; under "no change" each record falls in the
+    first half with probability (days of the first half / all days), so an exact binomial test tells
+    a trend from noise. The result is a count (COUNT, or SUM of a 0/1 flag), in long format (month,
+    label, count) or wide (month, one count per series).
+    """
+    tree = _parse(sql)
+    if not isinstance(tree, exp.Select) or len(tree.selects) != len(result.columns) or result.truncated:
+        return []
+    columns = _Columns(tree, schema)
+    found: list[Notice] = []
+    for index, projection in enumerate(tree.selects):
+        call = projection.this if isinstance(projection, exp.Alias) else projection
+        if not isinstance(call, exp.TimeToStr) or _string(call.args.get("format")) != "%Y-%m":
+            continue
+        column = _date_column(call.this)
+        resolved = columns.date_range(column) if column is not None else None
+        series = _series_counts(tree, result, index) if resolved is not None else None
+        if column is None or resolved is None or not series or len(series) > MAX_TREND_SERIES:
+            continue
+        table, lo, hi = resolved
+        lo, hi = _filter_bounds(tree, column, lo, hi)
+        seen = sorted({m for per_month in series.values() for m in per_month})
+        months = [m for m in months_between(seen[0], seen[-1]) if _days(m, lo, hi) > 0]
+        if len(months) < MIN_TREND_MONTHS:
+            continue
+        days = [_days(m, lo, hi) for m in months]
+        total, elapsed = sum(days), 0
+        first: list[str] = []
+        for month, d in zip(months, days, strict=True):
+            if elapsed + d / 2 < total / 2:
+                first.append(month)
+            elapsed += d
+        second = months[len(first) :]
+        first_days = sum(days[: len(first)])
+        share = first_days / total
+        parts, significant = [], []
+        for name, per_month in sorted(series.items()):
+            a = sum(per_month.get(m, 0) for m in first)
+            b = sum(per_month.get(m, 0) for m in second)
+            p = binomial_two_sided(a, a + b, share)
+            if p < ALPHA:
+                significant.append(name)
+            change = _change(a, first_days, b, total - first_days)
+            parts.append(f"{name} {a} → {b} ({change}, {_p_label(p)})")
+        monthly = [per_month.get(m, 0) for per_month in series.values() for m in months]
+        if not significant:
+            verdict = "Nenhuma diferença é estatisticamente significativa (p < 0,05): não há evidência de tendência."
+        elif len(significant) == len(series):
+            verdict = "A diferença é estatisticamente significativa (p < 0,05)."
+        else:
+            verb = "têm" if len(significant) > 1 else "tem"
+            verdict = f"Só {_join(significant)} {verb} diferença estatisticamente significativa (p < 0,05)."
+        volume = ""
+        if max(monthly) < LOW_VOLUME:
+            volume = (
+                f" Com {min(monthly)} a {max(monthly)} registros por mês em {table}, "
+                "o volume é baixo para afirmar tendência."
+            )
+        found.append(
+            Notice(
+                kind="trend",
+                text=(
+                    f"Tendência, primeira metade do período ({short_month(first[0])} a {short_month(first[-1])}) "
+                    f"contra a segunda ({short_month(second[0])} a {short_month(second[-1])}), ajustada pelos dias "
+                    f"cobertos: {'; '.join(parts)}. {verdict}{volume}"
+                ),
+            )
+        )
+    return found
+
+
 def compute_notices(sql: str, result: QueryResult, schema: SchemaInfo, settings: Settings) -> list[Notice]:
     """All notices for the final answer. Never raises: each check that fails just adds nothing."""
     found: list[Notice] = []
@@ -382,4 +590,8 @@ def compute_notices(sql: str, result: QueryResult, schema: SchemaInfo, settings:
         found.extend(series_notices(sql, result, schema, covered=periods))
     except Exception as err:
         logger.warning("series notices skipped: %s", type(err).__name__)
+    try:
+        found.extend(trend_notices(sql, result, schema))
+    except Exception as err:
+        logger.warning("trend notice skipped: %s", type(err).__name__)
     return found

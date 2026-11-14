@@ -79,11 +79,14 @@ O modelo vê os 3 últimos turnos: pergunta, SQL e resposta, com fichas no lugar
 
 ### Avisos automáticos
 
-Dois avisos são calculados no código, a partir da SQL final e dos dados, nunca pelo modelo:
+Estes avisos são calculados no código, a partir da SQL final e dos dados, nunca pelo modelo:
 
 - **Empate no corte:** num ranking com `LIMIT n`, se há linhas de fora empatadas com a n-ésima, a resposta avisa quais são. Na pergunta dos 5 estados, Alagoas, Espírito Santo e Paraná empatam com 2 clientes e só cabem dois. Funciona também com `ORDER BY 2`. Sem segundo critério de ordenação, o aviso diz que quem fica de fora é arbitrário.
 - **Período incompleto:** se a SQL filtra um período que os dados cobrem só em parte, a resposta diz o intervalo real. "Em 2024" cobre só de 22/07/2024 a 31/12/2024. O filtro pode vir como `strftime(...) = '2024'`, `LIKE '2024%'`, `BETWEEN` ou `>=`/`<`. Um período sem nenhum dado ("agosto de 2025") é avisado como "sem registros".
 - **Pontas da série:** numa série mensal, o primeiro e o último mês que os dados cobrem só em parte são marcados. Nas reclamações, julho de 2024 começa no dia 23 e julho de 2025 termina no dia 22.
+- **Tendência:** numa série mensal de contagens, a primeira metade do período é comparada com a segunda, com cada metade ajustada pelos dias que cobre, e um teste binomial exato separa tendência de oscilação. Com menos de 10 registros por mês, o aviso diz que o volume é baixo. Nas reclamações, Telefone cai de 23 para 12, mas com p = 0,17 e de 0 a 6 reclamações por mês isso não é evidência de tendência.
+
+No gráfico de linhas, um mês sem registros numa contagem aparece como zero; antes a linha ligava os meses vizinhos por cima dele.
 
 Se a SQL não dá para analisar, não há aviso; um erro no cálculo de um aviso nunca derruba a resposta.
 
@@ -94,10 +97,11 @@ Se a SQL não dá para analisar, não há aviso; um erro no cálculo de um aviso
 | Armadilha | Tratamento |
 |---|---|
 | `clientes.valor_total_gasto` e `clientes.data_ultima_compra` não batem com a tabela `compras` | Marcadas como não confiáveis no dicionário; totais e datas vêm de `compras` |
-| Os dados vão de 2024-07-22 a 2025-07-22 | "Último ano", "em maio" e similares usam a data mais recente do banco, não a data de hoje. "Maio" = 2025-05 |
+| Os dados vão de 2024-07-22 a 2025-07-22 | "Último ano" e similares usam a data mais recente do banco, não a data de hoje. Julho é o único mês que aparece em dois anos: sem ano, vale a ocorrência mais recente (2025, até o dia 22) e a premissa é declarada |
 | "Em 2024" cobre só julho a dezembro | A resposta declara a cobertura real, e um aviso automático mostra o intervalo |
 | `estado` está por extenso, não em sigla | Anotado no dicionário |
-| Perguntas ambíguas ("média de compras por cliente") | O agente assume a leitura padrão e declara a premissa na resposta |
+| Perguntas ambíguas ("média de compras por cliente") | O agente assume a leitura padrão e declara a premissa na resposta. Quando a outra leitura muda a conclusão, as duas aparecem |
+| `nome_campanha` ("Black Friday", "Natal") parece um período | Anotado no dicionário: cada nome foi enviado ao longo de toda a janela, e o período é sempre `data_envio` |
 
 ## API
 
@@ -207,11 +211,11 @@ Vinte perguntas não provam robustez geral. A avaliação serve para pegar regre
 
 | Pergunta | Resposta |
 |---|---|
-| Liste os 5 estados com maior número de clientes que compraram via app em maio. | Maio de 2025: São Paulo (6), Minas Gerais e Santa Catarina (3) e dois entre Alagoas, Espírito Santo e Paraná, empatados com 2. A resposta traz o aviso de empate no corte |
+| Liste os 5 estados com maior número de clientes que compraram via app em maio. | Conta clientes distintos, não compras. Maio de 2025: São Paulo (6), Minas Gerais e Santa Catarina (3) e dois entre Alagoas, Espírito Santo e Paraná, empatados com 2. A resposta traz o aviso de empate no corte |
 | Quantos clientes interagiram com campanhas de WhatsApp em 2024? | 17, com o aviso de que os dados de 2024 cobrem só julho a dezembro |
-| Quais categorias de produto tiveram o maior número de compras em média por cliente? | Roupas (2,21), Viagens (2,16), Livros (1,98), Serviços (1,96), Eletrônicos (1,92), Alimentos (1,88) |
+| Quais categorias de produto tiveram o maior número de compras em média por cliente? | Por cliente que comprou: Roupas (2,21), Viagens (2,16), Livros (1,98), Serviços (1,96), Eletrônicos (1,92), Alimentos (1,88). Por cliente cadastrado, a ordem muda (Livros lidera com 1,64); nas duas leituras as categorias ficam próximas, praticamente equivalentes |
 | Qual o número de reclamações não resolvidas por canal? | Telefone 19, Chat 18, E-mail 14 |
-| Qual a tendência de reclamações por canal no último ano? | Série mensal de julho de 2024 a julho de 2025, em gráfico de linhas (imagem acima) |
+| Qual a tendência de reclamações por canal no último ano? | Série mensal de julho de 2024 a julho de 2025, em gráfico de linhas (imagem acima). Nenhum canal tem tendência estatisticamente significativa: o volume é de 0 a 6 reclamações por mês |
 
 ## Estrutura
 
@@ -221,7 +225,7 @@ src/
   agent/                   grafo LangGraph, AgentDecision, prompts
   db/tools.py              run_sql com guardrails e descoberta do schema
   semantic/                dicionário de negócio e validação contra o schema
-  agent/notices.py         avisos de empate no corte, período incompleto e pontas da série
+  agent/notices.py         avisos de empate no corte, período incompleto, pontas da série e tendência
   api.py                   API FastAPI (/health, /conversations, /ask, /ask/stream)
   llm.py, resilience.py    provedores (AI Studio, Vertex), limitador, fallback, cache, registro de cota
   privacy.py               pseudonimização de nome e e-mail

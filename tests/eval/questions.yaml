@@ -35,10 +35,14 @@
 # ano só também batem com o número do mês ('01', 1). Dados pessoais nunca aparecem neste arquivo:
 # [nome_1] é trocado pelo nome do cliente 1 na hora de perguntar (src/privacy.py).
 #
-# Data de referência dos dados: 2025-07-22 (máximo das datas). "Maio" = 2025-05; "julho" = 2025-07.
+# Janela dos dados: 2024-07-22 a 2025-07-22 (data de referência = máximo das datas). Só julho aparece
+# em dois anos (2024 a partir do dia 22 e 2025 até o dia 22): é ele a armadilha do mês sem ano (A2).
+# "Maio" (E1) não é ambíguo, só existe 2025-05.
 
 cases:
   # ---------------------------------------------------------------- as 5 do enunciado
+  # Premissa: a pergunta conta CLIENTES distintos, não compras (convenção do dicionário). Um
+  # cliente com duas compras pelo app em maio conta uma vez; COUNT(*) é a armadilha.
   - id: E1
     kind: enunciado
     question: Liste os 5 estados com maior número de clientes que compraram via app em maio.
@@ -50,6 +54,12 @@ cases:
     reference:
       - >-
         SELECT c.estado, COUNT(DISTINCT p.cliente_id) AS clientes
+        FROM compras p JOIN clientes c ON c.id = p.cliente_id
+        WHERE p.canal = 'App' AND strftime('%Y-%m', p.data_compra) = '2025-05'
+        GROUP BY c.estado
+    traps:
+      - >-
+        SELECT c.estado, COUNT(*) AS compras
         FROM compras p JOIN clientes c ON c.id = p.cliente_id
         WHERE p.canal = 'App' AND strftime('%Y-%m', p.data_compra) = '2025-05'
         GROUP BY c.estado
@@ -67,15 +77,25 @@ cases:
         SELECT COUNT(DISTINCT cliente_id) FROM campanhas_marketing
         WHERE canal = 'WhatsApp' AND interagiu = 1 AND strftime('%Y', data_envio) = '2024'
 
+  # O denominador inverte o ranking: por cliente que comprou, Roupas lidera (2,21) e Livros é o
+  # terceiro (1,98); por cliente cadastrado, Livros lidera (1,64) e Roupas é o quarto (1,57). Nas
+  # duas leituras as seis categorias ficam a menos de 18% uma da outra: praticamente equivalentes.
   - id: E3
     kind: enunciado
     question: Quais categorias de produto tiveram o maior número de compras em média por cliente?
     expect: [answered]
+    assumption: true
+    assumption_terms: [compraram, comprou, cadastrad, todos os clientes, total de clientes, denominador]
     match: ranking
     rank_by: 1
     reference:
+      # padrão do dicionário: denominador = clientes que compraram na categoria
       - >-
         SELECT categoria, COUNT(*) * 1.0 / COUNT(DISTINCT cliente_id) AS media
+        FROM compras GROUP BY categoria
+      # leitura (b): todos os clientes cadastrados
+      - >-
+        SELECT categoria, COUNT(*) * 1.0 / (SELECT COUNT(*) FROM clientes) AS media
         FROM compras GROUP BY categoria
 
   - id: E4

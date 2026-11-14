@@ -73,7 +73,7 @@ class TokenUsage(BaseModel):
         )
 
 
-NoticeKind = Literal["tie_at_cut", "partial_period", "empty_period"]
+NoticeKind = Literal["tie_at_cut", "partial_period", "empty_period", "trend"]
 
 
 class Notice(BaseModel):
