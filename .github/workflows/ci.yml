@@ -25,6 +25,28 @@ jobs:
       - name: make check
         run: make check
 
+  # O caminho do README numa máquina limpa: o Python do sistema (sem setup-python) e só o que o README pede.
+  clean-ubuntu:
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Python do sistema, ainda sem o pacote do venv
+        run: apt-get update -qq && apt-get install -y -qq python3 make
+      - name: make install recusa e diz o que instalar
+        run: |
+          if make install 2> erro.txt; then echo "make install devia falhar sem python3.12-venv"; exit 1; fi
+          cat erro.txt
+          grep -F "apt install python3.12-venv" erro.txt
+      - name: Instalar o pacote que o README pede
+        run: apt-get install -y -qq python3.12-venv
+      - name: make install
+        run: make install
+      - name: make check
+        run: make check
+
   compose:
     runs-on: ubuntu-latest
     steps:

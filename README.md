@@ -11,17 +11,20 @@ Solução do desafio técnico de Engenheiro(a) de IA Pleno:
 
 ## Como rodar em 2 minutos
 
-Requisitos: Python 3.12 e uma chave gratuita do Gemini ([Google AI Studio](https://aistudio.google.com/apikey)).
+Requisitos: Python 3.12 ou mais novo, com `ssl` e `venv`, e uma chave gratuita do Gemini ([Google AI Studio](https://aistudio.google.com/apikey)). O Docker dispensa o Python da máquina.
 
 Linux e Mac:
 
 ```bash
+sudo apt install python3.12-venv make   # só no Debian/Ubuntu: o venv vem num pacote à parte
 cp .env.example .env        # preencha só GOOGLE_API_KEY
-make install                # cria .venv e instala as dependências do lock
+make install                # confere o Python, cria .venv e instala as dependências do lock
 make run                    # abre a interface em http://localhost:8501
 ```
 
-Com Docker (qualquer sistema):
+Antes de criar o `.venv`, o `make install` roda `scripts/check_python.py`. Se o Python não servir, ele para e diz o que fazer, em vez de deixar o pip falhar com uma mensagem enganosa. Isso cobre Python mais velho que 3.12, Python compilado sem `ssl` (é o caso do pyenv/asdf sem `libssl-dev`: o pip responde "No matching distribution found") e Debian/Ubuntu sem `python3.12-venv`. Para usar outro interpretador: `make install PYTHON=/usr/bin/python3`. A CI segue esses passos num Ubuntu 24.04 limpo, com o Python do sistema.
+
+Com Docker (qualquer sistema, sem depender do Python da máquina):
 
 ```bash
 docker compose up --build   # interface em http://localhost:8501, API em http://localhost:8000
@@ -53,6 +56,7 @@ Respondem do cache as 5 sugestões da tela, "E só no Chat?" logo depois de "Qua
 No PowerShell, os mesmos passos sem `make`:
 
 ```powershell
+py -3.12 scripts\check_python.py              # confere versão, ssl e venv
 py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 copy .env.example .env                        # preencha só GOOGLE_API_KEY
@@ -328,6 +332,7 @@ tests/eval/paraphrases.yaml conjunto congelado v1: paráfrases e perguntas inéd
 tests/eval/paraphrases_v2.yaml conjunto congelado v2: 34 perguntas inéditas
 docs/                      ADRs, avaliação, arquitetura do Desafio 2
 demo/llm-cache/            cache auditado das conversas da demo (modo sem chave)
+scripts/check_python.py    confere versão, ssl e venv do Python antes do make install
 pyproject.toml             dependências diretas; requirements*.txt é o lock gerado
 ```
 

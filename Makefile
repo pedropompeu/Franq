@@ -1,9 +1,13 @@
 PY := .venv/bin/python
+# Outro interpretador: make install PYTHON=/usr/bin/python3
+PYTHON ?= python3
 
 .PHONY: install lock lint typecheck test check run run-api demo eval eval-frozen eval-frozen-v1 demo-cache
 
+# Confere o Python antes (versão, ssl, venv) e recria o .venv do zero, mesmo se uma tentativa anterior falhou
 install:
-	python3 -m venv .venv
+	$(PYTHON) scripts/check_python.py
+	$(PYTHON) -m venv --clear .venv
 	$(PY) -m pip install -r requirements-dev.txt
 
 # Regera o lock a partir do pyproject.toml (a fonte das dependências diretas)
