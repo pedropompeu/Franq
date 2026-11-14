@@ -1,0 +1,139 @@
+{
+  "prompt_version": "10e909f9",
+  "models": "gemini-3.5-flash-lite:15",
+  "started": "2026-11-14T09:59:10",
+  "cases": {
+    "F01": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F02": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F03": {
+      "passed": 0,
+      "runs": 3
+    },
+    "F04": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F05": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F06": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F07": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F08": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F09": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F10": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F11": {
+      "passed": 1,
+      "runs": 3
+    },
+    "F12": {
+      "passed": 1,
+      "runs": 3
+    },
+    "F13": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F14": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F15": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F16": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F17": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F18": {
+      "passed": 3,
+      "runs": 3
+    },
+    "F19": {
+      "passed": 2,
+      "runs": 3
+    },
+    "F20": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N01": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N02": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N03": {
+      "passed": 0,
+      "runs": 3
+    },
+    "N04": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N05": {
+      "passed": 0,
+      "runs": 3
+    },
+    "N06": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N07": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N08": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N09": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N10": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N11": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N12": {
+      "passed": 3,
+      "runs": 3
+    },
+    "N13": {
+      "passed": 3,
+      "runs": 3
+    }
+  }
+}

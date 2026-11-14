@@ -1,0 +1,143 @@
+{
+  "prompt_version": "65a7b1ea",
+  "models": "gemini-3.5-flash-lite:15",
+  "started": "2026-11-14T10:38:11",
+  "cases": {
+    "G01": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G02": {
+      "passed": 0,
+      "runs": 3
+    },
+    "G03": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G04": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G05": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G06": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G07": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G08": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G09": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G10": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G11": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G12": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G13": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G14": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G15": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G16": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G17": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G18": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G19": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G20": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G21": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G22": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G23": {
+      "passed": 0,
+      "runs": 3
+    },
+    "G24": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G25": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G26": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G27": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G28": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G29": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G30": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G31": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G32": {
+      "passed": 3,
+      "runs": 3
+    },
+    "G33": {
+      "passed": 2,
+      "runs": 3
+    },
+    "G34": {
+      "passed": 3,
+      "runs": 3
+    }
+  }
+}
